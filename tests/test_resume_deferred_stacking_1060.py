@@ -405,7 +405,14 @@ def test_a_real_backgrounded_deferred_phase_blocks_its_own_resume_end_to_end(tmp
     """
     home, project, remember = _store(tmp_path)
     env = _env(home, project, remember, os.environ["PATH"])
-    env["REMEMBER_TEST_DEFER_DELAY"] = "3"
+    # 20s, not a few: #1079's own windows-latest evidence measured process-
+    # start overhead alone running into multiple seconds under CI load (the
+    # p50 of 8.7s this file's own module docstring area references
+    # elsewhere in this repo) -- a short delay here flaked on exactly that
+    # CI leg, where the resume's own dispatch did not even reach the first
+    # deferred phase until it had ALREADY finished and cleaned up, making a
+    # correct THIRD-style relaunch look like a broken guard.
+    env["REMEMBER_TEST_DEFER_DELAY"] = "20"
 
     session_id = "66666666-0000-4000-8000-000000001060"
     pid_file = remember / "tmp" / f"deferred-{session_id}.pid"
@@ -452,14 +459,14 @@ def test_a_real_backgrounded_deferred_phase_blocks_its_own_resume_end_to_end(tmp
     # marker -- same polling shape as this file's own PID-cleanup test
     # above, for the same CI-flake reason (a real, if normally short,
     # window between the slug write and the EXIT trap actually running).
-    deadline = time.time() + 15
+    deadline = time.time() + 40
     while time.time() < deadline and pid_file.exists():
         time.sleep(0.1)
     assert not pid_file.exists(), (
         "the real, first deferred phase never cleaned up its own PID "
         "marker on a normal finish"
     )
-    deadline = time.time() + 5
+    deadline = time.time() + 15
     while time.time() < deadline and not slug_record.is_file():
         time.sleep(0.05)
     assert slug_record.is_file(), (
@@ -476,7 +483,7 @@ def test_a_real_backgrounded_deferred_phase_blocks_its_own_resume_end_to_end(tmp
     result = _run_session_start(env, session_id, "resume")
     assert result.returncode == 0, result.stderr[-2000:]
 
-    deadline = time.time() + 15
+    deadline = time.time() + 40
     while time.time() < deadline and not slug_record.is_file():
         time.sleep(0.1)
     assert slug_record.is_file(), (
