@@ -169,10 +169,21 @@ class TestUncPathIsSafe:
     a drive letter as absolute."""
 
     def _run_guards(self, tmp_path: Path, value: str) -> str:
+        # The value travels through an ENVIRONMENT VARIABLE, not argv (#920
+        # CI round 2): a raw embedded newline byte in a bare (unquoted-by-
+        # list2cmdline, since it has no space/tab/quote to force quoting)
+        # argv element is lost somewhere between Python's subprocess list
+        # and the child's own argv on windows-latest -- observed as both
+        # "hook=1"/"log=1" (SAFE) for a value that must stay refused,
+        # reproduced identically on every windows-latest Python leg, never
+        # on ubuntu/macos. The guard predicates themselves are unchanged and
+        # correct POSIX; only the value's transport was unsafe for a
+        # control byte. An environment variable's value is not re-tokenized
+        # the way a win32 command line is, so it survives intact.
         script = tmp_path / "unc_probe.sh"
         body = (
             "set +e\n"
-            'REMEMBER_DIR="$1"\n'
+            'REMEMBER_DIR="$REMEMBER_DIR_PROBE_VALUE"\n'
             '_remember_dir_is_unsafe; echo "hook=$?"\n'
             '_remember_log_dir_unsafe; echo "log=$?"\n'
         )
@@ -182,8 +193,9 @@ class TestUncPathIsSafe:
             + body,
             encoding="utf-8",
         )
+        env = dict(os.environ, REMEMBER_DIR_PROBE_VALUE=value)
         result = subprocess.run(
-            [_BASH, _bash_path(script), value], capture_output=True, text=True, timeout=30, check=False,
+            [_BASH, _bash_path(script)], capture_output=True, text=True, timeout=30, check=False, env=env,
         )
         return result.stdout
 

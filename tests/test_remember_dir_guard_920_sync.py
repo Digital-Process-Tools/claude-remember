@@ -21,6 +21,7 @@ SAME way.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -65,7 +66,15 @@ def _run_all_three(value: str) -> dict[str, int]:
         _extract_function(LIB_MEMORY_DIR, "_remember_lmd_set_dir_unsafe")
         + _extract_function(HOOK, "_remember_dir_is_unsafe")
         + _extract_function(LOG_SH, "_remember_log_dir_unsafe")
-        + 'REMEMBER_DIR="$1"\n'
+        # Travels through an environment variable, not argv (#920 CI round
+        # 2): a bare, unquoted argv element carrying a raw embedded newline
+        # byte does not survive to the child process on windows-latest --
+        # observed identically on every windows-latest Python leg for both
+        # control-char CASES entries, never on ubuntu/macos, and never for
+        # any of the other (control-char-free) CASES values. An environment
+        # variable's value is not re-tokenized the way a win32 command line
+        # is, so it survives intact.
+        + 'REMEMBER_DIR="$REMEMBER_DIR_PROBE_VALUE"\n'
         # lib-memory-dir.sh's own copy sets a FLAG rather than returning a
         # status (it is called unconditionally, never in an `if`, so its own
         # exit status is never checked in the real file either) -- read the
@@ -78,9 +87,10 @@ def _run_all_three(value: str) -> dict[str, int]:
     )
     tmp = Path(__file__).parent / f"_sync_probe_{abs(hash(value))}.sh"
     tmp.write_text(body, encoding="utf-8")
+    env = dict(os.environ, REMEMBER_DIR_PROBE_VALUE=value)
     try:
         result = subprocess.run(
-            [_BASH, _bash_path(tmp), value], capture_output=True, text=True, timeout=30, check=False,
+            [_BASH, _bash_path(tmp)], capture_output=True, text=True, timeout=30, check=False, env=env,
         )
     finally:
         tmp.unlink(missing_ok=True)
