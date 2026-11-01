@@ -96,12 +96,19 @@ from __future__ import annotations
 
 import json
 import os
+import statistics
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
+
+# #660: test_benchmark_summary_line_survives_capture_660 drives the real
+# `pytester` fixture through a nested pytest subprocess -- see that test's
+# own docstring. `tests/test_conftest_import_failure_510.py` already uses
+# the same plugin the same way.
+pytest_plugins = ["pytester"]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SESSION_START = REPO_ROOT / "scripts" / "session-start-hook.sh"
@@ -160,23 +167,41 @@ JQ_ABSENT_WARM_SPAWN_BUDGET = 50
 # why. Measured locally: ~2.6s cold, ~0.2s warm.
 WALL_TIME_CEILING_SECONDS = 45.0
 
+# #660's own ask, on top of #669's existing cold/warm split: a single warm
+# sample is one shared-runner noise sample, not a number. The cold run stays
+# a single sample -- it can only be genuinely cold once per scenario, since
+# that single run is what populates the #668 caches whose absence it is
+# measuring -- but the "warm cache-hit start" half is repeatable with no
+# change of meaning (every call after the first is equally warm), so it is
+# run WARM_RUN_COUNT times and reported as a median, which is what #660's
+# re-measurement thread (kheirou, erdogan-deniz) actually did by hand
+# ("median of 5-7 runs") to get a number a single noisy sample cannot give.
+WARM_RUN_COUNT = 3
+
 
 def _format_benchmark_table(label: str, *, cold_time: float, cold_spawns: list,
-                             warm_time: float, warm_spawns: list) -> str:
+                             warm_time: float, warm_spawns: list,
+                             warm_runs: int = 1) -> str:
     """#673: the table the issue asks for -- one row per scenario x
     cold/warm, wall time in whole milliseconds (CI's own summary renderer is
     Markdown, not a spreadsheet; sub-ms precision is not what a human
     comparing run over run needs) and the real spawn count beside it. Pure
     and platform-independent by construction -- it takes numbers in and
     returns text, so it is tested directly with no subprocess, no tmp_path,
-    and no skip condition of its own."""
+    and no skip condition of its own.
+
+    #660: `warm_time` is a median when `warm_runs` > 1 -- the row label says
+    so rather than leaving a reader to guess whether a single sample or a
+    median produced the number, since the two mean different things about
+    how much to trust it."""
+    warm_row_label = f"warm (median of {warm_runs})" if warm_runs > 1 else "warm"
     return (
         f"### #669 benchmark: `{label}` ({sys.platform})\n"
         "\n"
         "| scenario | wall (ms) | spawns |\n"
         "| --- | --- | --- |\n"
         f"| cold | {cold_time * 1000:.0f} | {len(cold_spawns)} |\n"
-        f"| warm | {warm_time * 1000:.0f} | {len(warm_spawns)} |\n"
+        f"| {warm_row_label} | {warm_time * 1000:.0f} | {len(warm_spawns)} |\n"
     )
 
 
@@ -495,7 +520,7 @@ def _diagnose(env: dict, shims: Path, log: Path, label: str,
     return "\n".join(lines)
 
 
-def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
+def _benchmark(tmp_path: Path, record_property, capfd, *, jq_present: bool,
                 cold_budget: int, warm_budget: int, label: str):
     home, project, remember = _store(tmp_path)
     base_path = os.environ["PATH"] if jq_present else _path_without_jq(os.environ["PATH"], tmp_path)
@@ -525,10 +550,26 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
     assert cold.returncode == 0, (
         f"[{label}] cold run failed: {cold.stderr[-2000:]!r}"
     )
-    warm, warm_time, warm_spawns = _run_once(env, shims, log)
-    assert warm.returncode == 0, (
-        f"[{label}] warm run failed: {warm.stderr[-2000:]!r}"
-    )
+
+    # #660: the cold run above is the only sample that can ever be cold --
+    # it is what populates the #668 caches -- but every call after it is
+    # equally warm, so WARM_RUN_COUNT of them are taken and reported as a
+    # median rather than a single noisy sample (see WARM_RUN_COUNT's own
+    # comment). Spawn count is still read off the LAST warm run only: it is
+    # asserted elsewhere as a real failing budget, and asserting it against
+    # every run would just repeat the same deterministic count (or fail
+    # loudly on the first run that doesn't match, which is itself a useful
+    # signal -- the loop below prints every run's own spawn count in the
+    # diagnostics so that divergence is visible either way).
+    warm_runs = []
+    warm = warm_time = warm_spawns = None
+    for _ in range(WARM_RUN_COUNT):
+        warm, warm_time, warm_spawns = _run_once(env, shims, log)
+        assert warm.returncode == 0, (
+            f"[{label}] warm run failed: {warm.stderr[-2000:]!r}"
+        )
+        warm_runs.append((warm_time, len(warm_spawns)))
+    warm_median_time = statistics.median(t for t, _ in warm_runs)
 
     # Printed unconditionally, not only on failure: pytest shows captured
     # stdout for a FAILED test by default (no -s needed, confirmed against
@@ -561,38 +602,66 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
             f"{jq_calls}\n\n{diag}"
         )
 
+    per_run = ", ".join(
+        f"{t:.3f}s/{n}sp" for t, n in warm_runs
+    )
     summary_line = (
         f"#669 benchmark [{label}]: "
         f"cold {cold_time:.3f}s / {len(cold_spawns)} spawns, "
-        f"warm {warm_time:.3f}s / {len(warm_spawns)} spawns "
+        f"warm median {warm_median_time:.3f}s / {len(warm_spawns)} spawns "
+        f"over {WARM_RUN_COUNT} runs ({per_run}) "
         f"(platform={sys.platform}, bash={BASH})"
     )
     # #673: printed to BOTH streams (the issue's own ask) -- stdout so it
     # still shows up the way it always has (captured, surfaced by pytest on
     # a failure), stderr so it reaches a log that shows even when the run as
     # a whole is green, which is the whole gap #673 exists to close.
-    print(summary_line)
-    print(summary_line, file=sys.stderr)
+    #
+    # #660: that stderr half did not actually do that. pytest's default
+    # capture mode ("fd") redirects the real OS file descriptors 1/2 for the
+    # DURATION OF EVERY TEST, pass or fail, and only replays what it caught
+    # if the test fails (or -rA/-s is passed) -- a direct write() to fd 2,
+    # which is exactly what print(file=sys.stderr) does, is captured right
+    # along with stdout. Confirmed empirically: this PR's own first
+    # windows-latest CI run had zero matches for this line in the job log
+    # despite the benchmark passing. `capfd.disabled()` is the actual,
+    # pytest-documented way to make a write bypass that capture regardless
+    # of outcome -- see test_benchmark_summary_line_survives_capture_660
+    # below for a standalone proof of the mechanism, independent of this
+    # test's own heavy hook-driving fixtures.
+    with capfd.disabled():
+        print(summary_line)
+        print(summary_line, file=sys.stderr)
     table = _format_benchmark_table(
         label, cold_time=cold_time, cold_spawns=cold_spawns,
-        warm_time=warm_time, warm_spawns=warm_spawns,
+        warm_time=warm_median_time, warm_spawns=warm_spawns,
+        warm_runs=WARM_RUN_COUNT,
     )
-    print(table)
-    print(table, file=sys.stderr)
+    with capfd.disabled():
+        print(table)
+        print(table, file=sys.stderr)
     _append_step_summary(table)
     record_property(f"remember_benchmark_{label}_cold_seconds", round(cold_time, 3))
     record_property(f"remember_benchmark_{label}_cold_spawns", len(cold_spawns))
-    record_property(f"remember_benchmark_{label}_warm_seconds", round(warm_time, 3))
+    record_property(
+        f"remember_benchmark_{label}_warm_median_seconds", round(warm_median_time, 3)
+    )
     record_property(f"remember_benchmark_{label}_warm_spawns", len(warm_spawns))
+    record_property(
+        f"remember_benchmark_{label}_warm_seconds_all",
+        [round(t, 3) for t, _ in warm_runs],
+    )
 
     assert cold_time < WALL_TIME_CEILING_SECONDS, (
         f"[{label}] cold run took {cold_time:.1f}s -- past the hang-detection "
         f"ceiling of {WALL_TIME_CEILING_SECONDS}s, not merely slow"
     )
-    assert warm_time < WALL_TIME_CEILING_SECONDS, (
-        f"[{label}] warm run took {warm_time:.1f}s -- past the hang-detection "
-        f"ceiling of {WALL_TIME_CEILING_SECONDS}s, not merely slow"
-    )
+    for t, _ in warm_runs:
+        assert t < WALL_TIME_CEILING_SECONDS, (
+            f"[{label}] a warm run took {t:.1f}s -- past the hang-detection "
+            f"ceiling of {WALL_TIME_CEILING_SECONDS}s, not merely slow "
+            f"(all warm runs: {warm_runs})"
+        )
     assert len(cold_spawns) <= cold_budget, (
         f"[{label}] cold run spawned {len(cold_spawns)} processes "
         f"(budget {cold_budget}):\n  " + "\n  ".join(cold_spawns)
@@ -603,24 +672,24 @@ def _benchmark(tmp_path: Path, record_property, *, jq_present: bool,
     )
 
 
-def test_session_start_hook_benchmark_with_jq_present(tmp_path, record_property):
+def test_session_start_hook_benchmark_with_jq_present(tmp_path, record_property, capfd):
     """The common case: jq resolvable on PATH, as on macOS/Linux and on a
     Windows box where the user installed it (this repo's own docs/windows.md
     tells Git-Bash users to)."""
     _benchmark(
-        tmp_path, record_property, jq_present=True,
+        tmp_path, record_property, capfd, jq_present=True,
         cold_budget=JQ_PRESENT_COLD_SPAWN_BUDGET,
         warm_budget=JQ_PRESENT_WARM_SPAWN_BUDGET,
         label="jq_present",
     )
 
 
-def test_session_start_hook_benchmark_with_jq_absent(tmp_path, record_property):
+def test_session_start_hook_benchmark_with_jq_absent(tmp_path, record_property, capfd):
     """Git for Windows does not ship jq -- the issue's own stated reason this
     scenario needs its own measurement, not an assumption that the fallback
     costs the same."""
     _benchmark(
-        tmp_path, record_property, jq_present=False,
+        tmp_path, record_property, capfd, jq_present=False,
         cold_budget=JQ_ABSENT_COLD_SPAWN_BUDGET,
         warm_budget=JQ_ABSENT_WARM_SPAWN_BUDGET,
         label="jq_absent",
@@ -850,3 +919,67 @@ def test_step_summary_raises_loudly_when_path_unwritable(tmp_path, monkeypatch):
     )
     with pytest.raises(OSError):
         _append_step_summary(table)
+
+
+def test_benchmark_summary_line_survives_capture_660(pytester):
+    """#660: #673's own stated reason for printing the benchmark summary to
+    BOTH streams was so it "reaches a log that shows even when the run is
+    green" -- stdout is captured and only surfaced by pytest on a FAILURE,
+    so stderr was meant to be the half that always gets through. It did
+    not: pytest's default capture mode ("fd") redirects the real OS file
+    descriptors 1 and 2 for the duration of every test, pass or fail, and a
+    direct write() to fd 2 -- exactly what `print(file=sys.stderr)` does --
+    is captured right along with stdout. This PR's own first
+    `windows-latest` CI run confirmed it empirically: zero matches for the
+    summary line in that job's log, despite both benchmark tests passing.
+
+    `capfd.disabled()` is pytest's own documented way to make a write
+    bypass that capture regardless of outcome, and `_benchmark` above now
+    wraps its two summary prints in it. This test drives that REAL pytest
+    fixture through a nested subprocess rather than asserting against a
+    description of what it is documented to do -- the same reasoning this
+    file's own module docstring gives for driving the real hook under real
+    bash instead of reasoning about it.
+
+    Positive/negative control, paired (CLAUDE.md: a "must fire" assertion
+    needs a "must not fire" twin, or a harness that captures nothing passes
+    the positive half for free). `test_with_disable` MUST reach the
+    subprocess's own output even though it passes; `test_without_disable`,
+    identical but for the wrapper, MUST NOT -- proving the wrapper is what
+    did it, not an accident of this sub-run's own configuration."""
+    pytester.makepyfile(
+        test_with_disable="""
+            import sys
+
+            def test_x(capfd):
+                with capfd.disabled():
+                    print("MARKER-660-DISABLED", file=sys.stderr)
+        """,
+        test_without_disable="""
+            import sys
+
+            def test_x(capfd):
+                print("MARKER-660-NOT-DISABLED", file=sys.stderr)
+        """,
+    )
+    result = pytester.runpytest_subprocess(
+        "test_with_disable.py", "test_without_disable.py"
+    )
+    result.assert_outcomes(passed=2)
+    # Both markers are printed to the SUBPROCESS's stderr -- pytester's
+    # RunResult keeps stdout and stderr as separate LineMatcher objects
+    # (`.outlines` is `.stdout.lines` only), so the real evidence is in
+    # `.stderr`, not `.outlines`. Caught while writing this test: the first
+    # version asserted against `.outlines` and failed even for the
+    # DISABLED case, which would have made the positive assertion below
+    # meaningless had it been left unnoticed.
+    combined = "\n".join(result.stdout.lines + result.stderr.lines)
+    assert "MARKER-660-DISABLED" in combined, (
+        "capfd.disabled() did not let a stderr print reach the subprocess's "
+        f"own output on a PASSING test. Full output:\n{combined}"
+    )
+    assert "MARKER-660-NOT-DISABLED" not in combined, (
+        "a stderr print with no capfd.disabled() wrap reached the output "
+        "anyway -- the negative control failed, so the positive assertion "
+        f"above proves nothing. Full output:\n{combined}"
+    )
