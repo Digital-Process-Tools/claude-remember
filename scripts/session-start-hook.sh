@@ -829,6 +829,53 @@ if [ -n "$CURRENT_SESSION_ID" ]; then
     printf '%s\n' "$REMEMBER_HANDOFF" > "$REMEMBER_DIR/tmp/handoff-path.$CURRENT_SESSION_ID" 2>/dev/null
 fi
 
+# ── Session-store pointer (#1083) ───────────────────────────────────────────
+# Pinned OUTSIDE every project store, keyed by session id, so write-handoff.sh
+# and doctor.sh never have to guess the store from cwd via an ancestor walk
+# at all -- an ancestor walk can only ever see directories on the chain from
+# $(pwd) up to the git toplevel, categorically missing a nested repo one
+# level in, a non-git sibling, or a resumed session's own sibling directory.
+# Plain redirect into a temp file in the SAME directory, then `mv -f` --
+# atomic, so a concurrent read of the pointer (write-handoff.sh racing the
+# next SessionStart) never observes a partially written file. Overwritten on
+# every start, including `--resume`, same as the two pointers just above.
+# `mktemp` and `mv` ARE new forks on this path (scheduler review on #1083's
+# own PR: an earlier version of this comment claimed otherwise) -- accepted
+# for the predictable-name/symlink hazard `mktemp` closes, the same tradeoff
+# every other temp-file write in this codebase makes (see lib-memory-dir.sh's
+# own header for the long version of that argument).
+#
+# Scheduler review on #1083's own PR, finding 2: a start that does NOT
+# (re)write the pointer -- REMEMBER_DIR_UNSAFE, or the write itself failing
+# -- must not leave an EARLIER start's pointer for this same session id
+# sitting there unrewritten: write-handoff.sh would still read a store this
+# start never vouched for, bypassing #1064's own unsafe-store refusal. The
+# pointer is deleted whenever this start does not successfully republish it.
+if [ -n "$CURRENT_SESSION_ID" ]; then
+    _REMEMBER_SESSION_STORE_DIR="$HOME/.remember/tmp/session-store"
+    _REMEMBER_SESSION_STORE_WRITTEN=0
+    # #920 gap 1, same guard this file already applies to every other
+    # mkdir -- never create or write into this directory off an unsafe
+    # REMEMBER_DIR, and never publish an unsafe REMEMBER_DIR into it either.
+    [ "${REMEMBER_DIR_UNSAFE:-0}" = 1 ] || [ -d "$_REMEMBER_SESSION_STORE_DIR" ] || mkdir -p "$_REMEMBER_SESSION_STORE_DIR" 2>/dev/null
+    if [ "${REMEMBER_DIR_UNSAFE:-0}" != 1 ] && [ -d "$_REMEMBER_SESSION_STORE_DIR" ]; then
+        _REMEMBER_SESSION_STORE_TMP=$(mktemp "$_REMEMBER_SESSION_STORE_DIR/.tmp-XXXXXX" 2>/dev/null) || _REMEMBER_SESSION_STORE_TMP=""
+        if [ -n "$_REMEMBER_SESSION_STORE_TMP" ]; then
+            if printf '%s\n' "$REMEMBER_DIR" > "$_REMEMBER_SESSION_STORE_TMP" 2>/dev/null \
+                && mv -f "$_REMEMBER_SESSION_STORE_TMP" "$_REMEMBER_SESSION_STORE_DIR/$CURRENT_SESSION_ID" 2>/dev/null; then
+                _REMEMBER_SESSION_STORE_WRITTEN=1
+            else
+                rm -f "$_REMEMBER_SESSION_STORE_TMP" 2>/dev/null
+            fi
+        fi
+        unset _REMEMBER_SESSION_STORE_TMP
+    fi
+    if [ "$_REMEMBER_SESSION_STORE_WRITTEN" != 1 ]; then
+        rm -f "$_REMEMBER_SESSION_STORE_DIR/$CURRENT_SESSION_ID" 2>/dev/null
+    fi
+    unset _REMEMBER_SESSION_STORE_DIR _REMEMBER_SESSION_STORE_WRITTEN
+fi
+
 # ── Handoff path hint (human-facing only since #720) ───────────────────────
 # Emitted in external mode (unchanged, #56/#296) OR whenever this session
 # resolved a per-session path — in LEGACY per_session mode REMEMBER_HANDOFF
@@ -1602,6 +1649,75 @@ if [ -d "$SESSIONS_DIR" ] && [ -d "$REMEMBER_DIR/tmp" ]; then
     _remember_prune_stale_session_files remember.delivered
     _remember_prune_stale_session_files handoff-path
 fi
+
+# _remember_prune_stale_session_store_pointers (#1083)
+# Sweeps $HOME/.remember/tmp/session-store/<session-id> -- the pointer
+# written above, in a directory OUTSIDE every REMEMBER_DIR. NOT a
+# parameterized call into _remember_prune_stale_session_files above: that
+# helper's own filename shape is "<prefix>.<id>" under $REMEMBER_DIR/tmp
+# (one dot-separated name per PROJECT's own store); this pointer's shape is
+# "<id>" alone, flat, under ONE directory SHARED BY EVERY PROJECT on the
+# machine.
+#
+# Scheduler review on #1083's own PR, finding 1: the first version of this
+# swept by "no transcript under $SESSIONS_DIR" -- correct for the sibling
+# helper, where $SESSIONS_DIR is THIS project's own transcript folder and
+# every file it sweeps belongs to THIS project's own store, but wrong here,
+# where this directory holds pointers for every project's session ids. A
+# session that started in project B has no transcript under project A's
+# $SESSIONS_DIR at all, so sweeping this shared directory by that test
+# deleted a live session's pointer the moment a DIFFERENT project's
+# SessionStart happened to run the reaper. This sweeps by AGE ALONE instead
+# -- REMEMBER_SESSION_STORE_POINTER_MAX_AGE_S, default 7 days, far beyond
+# any session's real length -- never by a transcript check this directory
+# has no project-scoped way to perform correctly.
+_remember_prune_stale_session_store_pointers() {
+    local _ss_dir="${HOME}/.remember/tmp/session-store" _file _id _mtime _now
+    local _max_age="${REMEMBER_SESSION_STORE_POINTER_MAX_AGE_S:-604800}"
+    [[ "$_max_age" == *[!0-9]* ]] && _max_age=604800
+    [ -d "$_ss_dir" ] || return 0
+    for _file in "$_ss_dir"/*; do
+        [ -f "$_file" ] || continue
+        _id="${_file##*/}"
+        [ -n "$_id" ] || continue
+        # Never sweep this very invocation's own temp file (the dot-prefixed
+        # mktemp name above, still present for the instant between its
+        # create and its `mv -f` into place) -- an expansion test, not a
+        # `case` with a catch-all arm (#898 round 7). Or the pointer it
+        # just wrote, for THIS session id -- a DIFFERENT project's own
+        # pointer for a different id is correctly left for age alone to
+        # decide, same as every other project's.
+        [ "${_id#.tmp-}" != "$_id" ] && continue
+        [ "$_id" = "$CURRENT_SESSION_ID" ] && continue
+        _mtime=$(stat -c %Y "$_file" 2>/dev/null) \
+            || _mtime=$(stat -f %m "$_file" 2>/dev/null) \
+            || _mtime=""
+        if [ -z "$_mtime" ] || [[ "$_mtime" == *[!0-9]* ]]; then
+            continue
+        fi
+        _now=""
+        _remember_date_into _now +%s
+        if [ -z "$_now" ] || [[ "$_now" == *[!0-9]* ]]; then
+            continue
+        fi
+        if [ "$_now" -gt 0 ] && [ "$_mtime" -gt 0 ] \
+            && [ $((10#$_now - 10#$_mtime)) -lt "$_max_age" ]; then
+            continue
+        fi
+        rm -f "$_file" 2>/dev/null
+    done
+    return 0
+}
+
+# Scheduler review on #1083's own PR, finding 4: this sweep is pure cleanup
+# of OTHER sessions' old pointers -- nothing downstream of THIS start reads
+# its result -- so, like the cache-publish sweep just below, it is pushed to
+# the same already-established deferred/background phase rather than
+# costing this start a stat-per-foreign-pointer foreground cost.
+{
+    export _REMEMBER_PHASE=deferred
+    _remember_prune_stale_session_store_pointers
+} </dev/null >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
 unset GRACE_MIN
 
 # ── History hint ───────────────────────────────────────────────────────────

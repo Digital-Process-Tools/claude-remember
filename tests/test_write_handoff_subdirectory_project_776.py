@@ -30,7 +30,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -170,7 +169,7 @@ class TestSubdirectoryProjectIsRoutedToItsOwnStore:
 
 
 class TestFreshestHintWinsOnResume1058Review:
-    """Review finding on #1058 / PR #1081: the ancestor walk must pick the
+    """Review finding on #1058 / PR #1081: the ancestor walk used to pick the
     FRESHEST session hint among every ancestor that carries one, not just
     the nearest to $(pwd). session-start-hook.sh republishes
     tmp/handoff-path.<id> on every SessionStart for a given session id --
@@ -179,22 +178,27 @@ class TestFreshestHintWinsOnResume1058Review:
     and the earlier directory's hint is not pruned just because a later
     SessionStart happened somewhere else. "Closest ancestor with a hint"
     can therefore pick a directory the session has since moved on from,
-    over the one it most recently resolved to."""
+    over the one it most recently resolved to.
 
-    def test_a_fresher_hint_at_the_toplevel_beats_a_stale_one_at_a_nearer_ancestor(self, tmp_path):
+    #1083 superseded the mtime tie-break itself: a same-second write
+    defeats whole-second mtime comparison outright (worse on FAT, 2s
+    resolution), so "pick the freshest" was never more than a
+    plausible-looking guess among two candidates. These two tests now
+    exercise the AMBIGUOUS case this walk only ever reaches as a FALLBACK,
+    for a session with no #1083 pointer at all -- and #1083's ruling is to
+    REFUSE rather than guess. The third test in this class (single
+    candidate, no ambiguity at all) is unaffected and still passes
+    unchanged below."""
+
+    def test_two_ancestors_both_claiming_this_session_refuses_rather_than_guesses(self, tmp_path):
+        """The #776/#1058 "resume" shape: the session resumed at the repo
+        root after originally starting in `pkg`, so BOTH ancestors now
+        carry a hint for this session id. With no #1083 pointer to
+        disambiguate, the walk used to tie-break by mtime (whichever was
+        written more recently) -- #1083's ruling is to refuse outright
+        instead, on the same principle the pointer itself is built on."""
         project, sub_project, deep, home = _sandbox_git_repo_with_deep_subproject(tmp_path)
 
-        # The subdirectory project's hint (planted by the shared fixture)
-        # is the STALE one -- back-date its mtime well outside any
-        # ordinary clock-skew tolerance.
-        sub_hint = sub_project / ".remember" / "tmp" / f"handoff-path.{SESSION_ID}"
-        old_time = time.time() - 3600
-        os.utime(sub_hint, (old_time, old_time))
-
-        # The enclosing repository's own store ALSO carries this session's
-        # hint, written more recently -- the #776/#1058 "resume" shape: the
-        # same session id resumed from the repo root after originally
-        # starting in `pkg`.
         root_remember = project / ".remember"
         (root_remember / "tmp").mkdir(parents=True)
         (root_remember / "config.json").write_text(json.dumps({"data_dir": ".remember"}))
@@ -203,18 +207,14 @@ class TestFreshestHintWinsOnResume1058Review:
 
         result = _write_handoff(deep, home, "note after a resume at the repo root\n")
 
-        assert result.returncode == 0, (
+        assert result.returncode == 1, (
             f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
         )
+        assert "REFUSED" in result.stderr
         sub_target = sub_project / ".remember" / "remember.md"
-        assert root_target.exists() and "note after a resume at the repo root" in root_target.read_text(), (
-            f"expected the FRESHER hint (the repo root, re-published by the "
-            f"resume) to win over the STALE one at the nearer ancestor.\n"
-            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
-        )
-        assert not sub_target.exists(), (
-            "note was misrouted to the stale nearer ancestor instead of the "
-            "freshest hint -- the #1058/PR #1081 review regression"
+        assert not sub_target.exists() and not root_target.exists(), (
+            "an ambiguous resolution still wrote a note somewhere, rather "
+            "than refusing -- the #1083 ruling is to never guess here"
         )
 
     def test_positive_control_the_only_hint_present_still_wins_regardless_of_mtime(self, tmp_path):
@@ -234,46 +234,38 @@ class TestFreshestHintWinsOnResume1058Review:
         assert sub_target.exists() and "note with only one hint anywhere" in sub_target.read_text()
         assert not root_target.exists()
 
-    def test_a_fresh_near_hint_beats_a_stale_far_one_for_the_right_reason(self, tmp_path):
-        """The mirror image of the resume test above: this time the NEAR
-        ancestor's hint is the fresh, correct one, and the FAR ancestor (the
-        git toplevel) carries a stale one left over from some earlier
-        session or an accidental stray write. Maintainer-requested
-        regression test: a hypothetical "farthest ancestor with any hint
-        wins" implementation, or one that tie-breaks on walk ORDER rather
-        than on mtime, would pick the toplevel here and fail this test --
-        the only way to pass both this test and the resume test above is to
-        genuinely compare mtimes."""
+    def test_a_near_and_a_far_hint_both_present_refuses_rather_than_guesses(self, tmp_path):
+        """The mirror image of the test above: this time the NEAR ancestor's
+        hint is the one the fixture planted, and the FAR ancestor (the git
+        toplevel) carries an independently-written one -- a stray write, or
+        a session that genuinely touched both stores at some point. Before
+        #1083 this was decided by mtime (whichever was written more
+        recently); #1083's ruling removes that guess for the no-pointer
+        fallback entirely, regardless of which side -- near or far -- would
+        have won it."""
         project, sub_project, deep, home = _sandbox_git_repo_with_deep_subproject(tmp_path)
 
-        # The subdirectory project's hint (planted by the shared fixture) is
-        # the FRESH, correct one -- leave its mtime untouched (just written
-        # by the fixture, so it is newer than anything backdated below).
-
-        # The enclosing repository's own store carries a STALE hint --
-        # back-dated well outside any ordinary clock-skew tolerance.
+        # The subdirectory project's hint is the one the shared fixture
+        # already planted. The enclosing repository's own store ALSO
+        # carries a hint for this session -- mtime is irrelevant now, so
+        # it is left at whatever `write_text` gives it.
         root_remember = project / ".remember"
         (root_remember / "tmp").mkdir(parents=True)
         (root_remember / "config.json").write_text(json.dumps({"data_dir": ".remember"}))
         root_target = root_remember / "remember.md"
         root_hint = root_remember / "tmp" / f"handoff-path.{SESSION_ID}"
         root_hint.write_text(str(root_target))
-        old_time = time.time() - 3600
-        os.utime(root_hint, (old_time, old_time))
 
         result = _write_handoff(deep, home, "note from the fresh near ancestor\n")
 
-        assert result.returncode == 0, (
+        assert result.returncode == 1, (
             f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
         )
+        assert "REFUSED" in result.stderr
         sub_target = sub_project / ".remember" / "remember.md"
-        assert sub_target.exists() and "note from the fresh near ancestor" in sub_target.read_text(), (
-            f"expected the FRESH near ancestor to win over the STALE far "
-            f"(toplevel) one.\nstdout: {result.stdout!r}\nstderr: {result.stderr!r}"
-        )
-        assert not root_target.exists(), (
-            "note was misrouted to the stale toplevel store instead of the "
-            "fresh nearer one -- walk-order or farthest-wins regression"
+        assert not sub_target.exists() and not root_target.exists(), (
+            "an ambiguous resolution still wrote a note somewhere, rather "
+            "than refusing"
         )
 
 
