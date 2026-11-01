@@ -51,6 +51,7 @@ from ._bash_runner import resolve_bash
 from .subprocess_helpers import subprocess_failure_detail
 from .test_session_start_prev_session_270 import (
     CURRENT,
+    OLDER,
     PREV,
     _await_record,
     _env,
@@ -97,6 +98,24 @@ def _seed_roster_epoch(remember: Path, prev_jsonl: Path) -> None:
     epoch.write_text("")
     old = int(prev_jsonl.stat().st_mtime) - 3600
     os.utime(epoch, (old, old))
+
+
+# #1087: the live-sibling-recency signal reads mtimes against a 5-minute
+# threshold (scripts/capture-gap-check.sh's own _ROSTER_LIVE_GRACE_MIN).
+# _startup_project's default PREV mtime (60s old) sits INSIDE that window on
+# purpose -- that is exactly what a live sibling window's still-growing
+# transcript looks like, and is reused as-is by the new must-fire test
+# below. A test that means to exercise "genuinely dead, pre-update session"
+# must push PREV (and OLDER, to preserve _find_previous_transcript's
+# newest-other ordering) outside the window explicitly, rather than relying
+# on the fixture's default age to mean that by accident.
+def _age_past_the_live_window(session_dir: Path) -> None:
+    now = int(time.time())
+    prev = session_dir / f"{PREV}.jsonl"
+    os.utime(prev, (now - 3600, now - 3600))
+    older = session_dir / f"{OLDER}.jsonl"
+    if older.exists():
+        os.utime(older, (now - 4200, now - 4200))
 
 
 def test_recovery_declines_a_candidate_with_no_roster_marker_in_this_store(tmp_path):
@@ -148,8 +167,14 @@ def test_pre_epoch_unmarked_candidate_is_rescued_as_a_one_time_upgrade_grace(tmp
     declined, precisely because no epoch file exists yet. Paired with the
     steady-state test above per this repo's own CLAUDE.md: a guard that
     always rescues would pass this test for the wrong reason without that
-    one next to it."""
-    home, project, remember, _ = _startup_project(tmp_path)
+    one next to it.
+
+    #1087: PREV is explicitly aged past the live-sibling-recency window --
+    see _age_past_the_live_window's own docstring -- so this test keeps
+    exercising a genuinely DEAD pre-update session, the positive control
+    the narrowed grace must still rescue."""
+    home, project, remember, session_dir = _startup_project(tmp_path)
+    _age_past_the_live_window(session_dir)
     assert not (remember / "tmp" / "capture-alive.d" / PREV).exists(), (
         "precondition: no roster marker for PREV under this store"
     )
@@ -183,8 +208,14 @@ def test_a_transcript_not_newer_than_the_epoch_is_also_rescued(tmp_path):
     """Sibling of the test above: roster-epoch EXISTS but PREV's own
     transcript is not newer than it -- i.e. PREV predates this store's
     roster-epoch, so it could not possibly have earned roster evidence
-    either, same as the pre-epoch case."""
+    either, same as the pre-epoch case.
+
+    #1087: aged past the live-sibling-recency window for the same reason
+    as the sibling test above -- the epoch-vs-transcript ordering below is
+    computed relative to PREV's own (now aged) mtime, so this stays a
+    pure test of THAT signal rather than also tripping the new one."""
     home, project, remember, session_dir = _startup_project(tmp_path)
+    _age_past_the_live_window(session_dir)
     epoch = remember / "tmp" / "roster-epoch"
     epoch.parent.mkdir(parents=True, exist_ok=True)
     epoch.write_text("")
@@ -368,6 +399,137 @@ def test_a_candidate_vouched_only_by_the_legacy_slot_is_still_rescued(tmp_path):
     assert PREV in argv, (
         f"expected recovery to rescue the legacy-slot-vouched session "
         f"{PREV!r}, got {argv!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #1087: narrowing the grace itself -- it must not rescue a conversation
+# that is still live, or that another store already claims, even during
+# the one-time upgrade window the two tests above still exercise.
+# ---------------------------------------------------------------------------
+
+
+def test_1087_grace_declines_a_recently_modified_live_sibling_transcript(tmp_path):
+    """Must-fire case, the issue's own repro shape: THIS store is pre-epoch
+    (never run under the roster-aware code before), which would normally
+    earn PREV the one-time upgrade grace -- but PREV's own transcript was
+    modified only 60 seconds ago (_startup_project's own, UNMODIFIED
+    default age), exactly what a live sibling window still writing to a
+    shared project transcript directory looks like. The grace must not
+    rescue it: recency blocks it outright, before the legacy/roster
+    evidence checks even run."""
+    home, project, remember, _ = _startup_project(tmp_path)
+    assert not (remember / "tmp" / "capture-alive.d" / PREV).exists(), (
+        "precondition: no roster marker for PREV under this store"
+    )
+    assert not (remember / "tmp" / "roster-epoch").exists(), (
+        "precondition: no roster-epoch yet -- the grace would normally "
+        "apply here"
+    )
+    (remember / "tmp" / "last-save.json").write_text(json.dumps({"sessions": {}}))
+    record = tmp_path / "save-argv.txt"
+    root = _plugin_root_with_stub_save(tmp_path, record)
+
+    result = _run(
+        _env(home, project, remember, plugin_root=root),
+        _payload(CURRENT),
+        script=root / "scripts" / "session-start-hook.sh",
+    )
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    argv = _await_record(record)
+    assert PREV not in argv, (
+        f"the pre-epoch grace rescued {PREV!r} despite its transcript "
+        f"having been modified only 60s ago -- a live sibling window "
+        f"sharing this project's transcript directory could still be "
+        f"writing it: {argv!r}"
+    )
+
+
+def test_1087_grace_declines_when_another_store_already_marks_the_session(tmp_path):
+    """Second must-fire case: PREV's transcript is old enough to look
+    genuinely dead (aged past the live-sibling-recency window, same as the
+    positive-control tests above), and THIS store is pre-epoch -- so the
+    grace would normally rescue it. But a DIFFERENT store, pinned under
+    $HOME/.remember the way the #1046 reporter's own setup was
+    (REMEMBER_DIR=~/.remember/roles/a, b, ...), already holds a
+    capture-alive.d marker for PREV's own session id: that store already
+    claims the session, so this one must not race it."""
+    home, project, remember, session_dir = _startup_project(tmp_path)
+    _age_past_the_live_window(session_dir)
+    assert not (remember / "tmp" / "capture-alive.d" / PREV).exists(), (
+        "precondition: no roster marker for PREV under THIS store"
+    )
+    assert not (remember / "tmp" / "roster-epoch").exists(), (
+        "precondition: no roster-epoch yet -- the grace would normally "
+        "apply here"
+    )
+    other_store = home / ".remember" / "roles" / "a"
+    (other_store / "tmp" / "capture-alive.d").mkdir(parents=True)
+    (other_store / "tmp" / "capture-alive.d" / PREV).write_text("")
+    (remember / "tmp" / "last-save.json").write_text(json.dumps({"sessions": {}}))
+    record = tmp_path / "save-argv.txt"
+    root = _plugin_root_with_stub_save(tmp_path, record)
+
+    result = _run(
+        _env(home, project, remember, plugin_root=root),
+        _payload(CURRENT),
+        script=root / "scripts" / "session-start-hook.sh",
+    )
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    argv = _await_record(record)
+    assert PREV not in argv, (
+        f"the pre-epoch grace rescued {PREV!r} despite another store "
+        f"(home/.remember/roles/a) already holding a capture-alive.d "
+        f"marker for it: {argv!r}"
+    )
+
+
+def test_1087_positive_control_a_dead_unmarked_session_outside_any_store_is_still_rescued(
+    tmp_path,
+):
+    """Positive control, paired with both must-fire cases above: PREV is
+    aged past the live-sibling-recency window (genuinely dead, not merely
+    old enough to look ambiguous), no store anywhere under $HOME/.remember
+    holds any marker for it, and THIS store is pre-epoch. The grace must
+    still rescue it -- proving the two new signals above only ever block a
+    live or claimed candidate, never a genuinely unclaimed one, same intent
+    as test_pre_epoch_unmarked_candidate_is_rescued_as_a_one_time_upgrade_
+    grace above but stated explicitly against both #1087 signals at once,
+    including a sibling store directory that exists but has no marker for
+    this particular session id."""
+    home, project, remember, session_dir = _startup_project(tmp_path)
+    _age_past_the_live_window(session_dir)
+    assert not (remember / "tmp" / "capture-alive.d" / PREV).exists(), (
+        "precondition: no roster marker for PREV under THIS store"
+    )
+    assert not (remember / "tmp" / "roster-epoch").exists(), (
+        "precondition: no roster-epoch yet"
+    )
+    # A sibling store exists under $HOME/.remember, same layout as the
+    # must-fire test above, but it has evidence for a DIFFERENT session --
+    # proving the walk does not simply treat "a sibling store exists" as
+    # "the session is claimed."
+    other_store = home / ".remember" / "roles" / "a"
+    (other_store / "tmp" / "capture-alive.d").mkdir(parents=True)
+    (other_store / "tmp" / "capture-alive.d" / "some-other-session-id").write_text("")
+    (remember / "tmp" / "last-save.json").write_text(json.dumps({"sessions": {}}))
+    record = tmp_path / "save-argv.txt"
+    root = _plugin_root_with_stub_save(tmp_path, record)
+
+    result = _run(
+        _env(home, project, remember, plugin_root=root),
+        _payload(CURRENT),
+        script=root / "scripts" / "session-start-hook.sh",
+    )
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    argv = _await_record(record)
+    assert PREV in argv, (
+        f"expected the one-time upgrade grace to still rescue a genuinely "
+        f"dead, unmarked session with no sibling-store evidence for it, "
+        f"got {argv!r}"
     )
 
 

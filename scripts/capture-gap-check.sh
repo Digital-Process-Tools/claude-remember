@@ -1054,6 +1054,109 @@ _remember_recovery_prev_id_vouched() {
     return 1
 }
 
+# #1087: narrows the one-time upgrade grace further down so it never
+# rescues a conversation that is still live, or that another store already
+# claims. Consulted ONLY when the grace would otherwise apply (roster-epoch
+# absent, or not older than the candidate) -- returns 0 ("blocked", the
+# grace must NOT apply) or 1 ("not blocked", the grace may still apply if
+# its own other condition holds).
+#
+# Signal 1 -- recency. A live sibling window keeps appending to its own
+# transcript, so an mtime from inside the last few minutes is exactly what
+# a still-running session looks like; a genuinely dead pre-update session
+# stopped being written the moment that old window closed, which is almost
+# always much longer ago than that. _ROSTER_LIVE_GRACE_MIN reuses the same
+# reasoned (not measured) 5-minute figure session-start-hook.sh's own
+# GRACE_MIN already uses for "still inside its own startup window" -- no
+# measured distribution backs either number, and two different unfounded
+# guesses here would only disagree by accident. Unreadable -- `stat`
+# failing outright, a non-numeric result, or the clock itself not being
+# available yet this early on the #1079 fast path -- is treated the same
+# safe direction as an unreadable $SESSIONS_DIR elsewhere in this file:
+# "cannot tell" counts as recent (blocks the grace), never silently
+# coerced into "confirmed old enough" by a failed comparison.
+#
+# Signal 2 -- another store's own marker. Checked at most two directory
+# levels under $HOME/.remember: the shipped default layout
+# (~/.remember/{slug}) is one level, and the #1046 reporter's own pinned
+# layout (~/.remember/roles/a, ~/.remember/roles/b) is two -- deep enough
+# to catch both without turning a background phase that already runs
+# every session start into an unbounded filesystem walk.
+# REMEMBER_STORE_ROOT is not reachable here: the #1046 issue's own second
+# finding is that a pinned REMEMBER_DIR (_LIB_MEMORY_DIR_LOADED=1, the
+# exact setup #1087 is about) makes lib-memory-dir.sh return before
+# REMEMBER_STORE_ROOT is ever set, so that variable is empty in precisely
+# the case this signal exists for.
+_ROSTER_LIVE_GRACE_MIN=5
+_remember_roster_grace_blocked() {
+    local _pid="$1" _jsonl="$2" _now="" _mtime="" _d1 _d2 _marker _LC_ALL_SAVE
+
+    [ -n "$_jsonl" ] && [ -f "$_jsonl" ] || return 0
+
+    _mtime=$(stat -c %Y "$_jsonl" 2>/dev/null) \
+        || _mtime=$(stat -f %m "$_jsonl" 2>/dev/null) \
+        || _mtime=""
+    if [ -z "$_mtime" ] || [[ "$_mtime" == *[!0-9]* ]]; then
+        return 0
+    fi
+    if ! command -v _remember_date_into >/dev/null 2>&1; then
+        # Forkless function definitions only -- cheap enough for this
+        # background phase even on the #1079 fast path, where log.sh
+        # itself is deliberately not sourced eagerly. Idempotent: a no-op
+        # if some other call site already sourced it first.
+        source "$_HOOK_DIR/lib-clock.sh" 2>/dev/null
+    fi
+    if command -v _remember_date_into >/dev/null 2>&1; then
+        _remember_date_into _now +%s
+    fi
+    if [ -z "$_now" ] || [[ "$_now" == *[!0-9]* ]]; then
+        return 0
+    fi
+    if [ $((10#$_now - 10#$_mtime)) -lt $((_ROSTER_LIVE_GRACE_MIN * 60)) ]; then
+        return 0
+    fi
+
+    # Same sanitization as _remember_recovery_prev_id_vouched above, and
+    # for the same reason: $_pid is a basename off a glob with no
+    # character-class check of its own. Same octal-escape dodge that
+    # function already uses for its own "." / ".." comparison, not a
+    # literal quoted dot: scripts/test_scanner_shapes_source_898.py's
+    # _check_dot_string sweep flags a bare `="."` shape (COMMAND_SCRIPT_
+    # NOT_FOLLOWED reads it as a `.` (source) command once this file is
+    # inlined into a compiled hook).
+    [ -n "$_pid" ] || return 1
+    _LC_ALL_SAVE="${LC_ALL:-}"
+    local LC_ALL=C
+    local _dot
+    printf -v _dot '\056'
+    if [ "$_pid" = "$_dot" ] || [ "$_pid" = "$_dot$_dot" ] \
+        || ! [[ "$_pid" =~ ^[A-Za-z0-9._-]*$ ]]; then
+        LC_ALL="$_LC_ALL_SAVE"
+        return 1
+    fi
+    LC_ALL="$_LC_ALL_SAVE"
+
+    if [ -n "${HOME:-}" ] && [ -d "$HOME/.remember" ]; then
+        for _d1 in "$HOME/.remember"/*/; do
+            [ -d "$_d1" ] || continue
+            for _marker in "$_d1"tmp/capture-alive.d/"$_pid" "$_d1"tmp/session-started.d/"$_pid"; do
+                if [ -e "$_marker" ] && [ "${_d1%/}" != "$REMEMBER_DIR" ]; then
+                    return 0
+                fi
+            done
+            for _d2 in "$_d1"*/; do
+                [ -d "$_d2" ] || continue
+                for _marker in "$_d2"tmp/capture-alive.d/"$_pid" "$_d2"tmp/session-started.d/"$_pid"; do
+                    if [ -e "$_marker" ] && [ "${_d2%/}" != "$REMEMBER_DIR" ]; then
+                        return 0
+                    fi
+                done
+            done
+        done
+    fi
+    return 1
+}
+
 # ── Recovery: save the most recent missed session ──────────────────────────
 # config_into (#665, part of #660) writes into a scratch var directly --
 # no command-substitution subshell on top of the flattened-cache-hit table.
@@ -1104,10 +1207,9 @@ _prev_id_possibly_foreign_store=""
 _remember_roster_epoch_grace=""
 ROSTER_EPOCH="$REMEMBER_DIR/tmp/roster-epoch"
 if [ -n "$REMEMBER_DIR" ]; then
-    if [ ! -f "$ROSTER_EPOCH" ]; then
-        _remember_roster_epoch_grace="true"
-    elif [ -n "$PREV_JSONL" ] && [ -f "$PREV_JSONL" ] \
-        && ! [ "$PREV_JSONL" -nt "$ROSTER_EPOCH" ]; then
+    if { [ ! -f "$ROSTER_EPOCH" ] || { [ -n "$PREV_JSONL" ] && [ -f "$PREV_JSONL" ] \
+        && ! [ "$PREV_JSONL" -nt "$ROSTER_EPOCH" ]; }; } \
+        && ! _remember_roster_grace_blocked "$PREV_ID" "$PREV_JSONL"; then
         _remember_roster_epoch_grace="true"
     fi
 fi
