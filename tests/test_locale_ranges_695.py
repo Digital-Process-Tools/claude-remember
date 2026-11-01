@@ -254,8 +254,8 @@ ALLOWLIST: dict[tuple[str, int], str] = {
     ("scripts/session-end-hook.sh", 196): _CASE,
     ("scripts/session-end-hook.sh", 204): _CASE,
     ("scripts/session-start-hook.sh", 421): _CASE,
-    ("scripts/write-handoff.sh", 97): _CASE,
-    ("scripts/doctor.sh", 70): _CASE,
+    ("scripts/write-handoff.sh", 103): _CASE,
+    ("scripts/doctor.sh", 74): _CASE,
     ("scripts/lib-slug.sh", 437): _CASE,
 }
 
