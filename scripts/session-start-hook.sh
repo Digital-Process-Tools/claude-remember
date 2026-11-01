@@ -514,23 +514,24 @@ SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 #     900 = 15min) is treated as stale regardless of what `kill -0` says,
 #     so a PID-recycling false-positive cannot block recovery for that
 #     session id indefinitely -- only until the bound passes.
-#   * `kill -0` alone is suspected (REASONED, not directly confirmed --
-#     no Windows host was available to prove it; see #1079's own CI
-#     evidence of the SYMPTOM, not the mechanism) to false-negative on a
-#     PID that is genuinely alive but was never spawned under THIS bash's
-#     own MSYS/Git-Bash process tree: windows-latest CI showed a resume
-#     whose PID marker named a still-running process (started directly by
-#     the Python test harness, not forked from any MSYS shell) vanish
-#     entirely within one second -- consistent with the guard reading
-#     that PID as dead, falling through to the launch branch, overwriting
-#     the marker, and then (once the freshly-launched child finished)
-#     deleting it via its own normal-exit cleanup. `/proc` is populated by
-#     walking the real OS process table, not by an MSYS-internal signal-
-#     delivery registration, so it can see a PID `kill` cannot. Tried
-#     FIRST, as an extra "still alive" signal `kill -0` alone would miss
-#     -- never as a replacement, since a host with no `/proc` (macOS)
-#     must still fall back to `kill -0` exactly as before. Builtin-only
-#     (`[ -e ]`), so this costs nothing on the hot path.
+#   * `kill -0` was SUSPECTED (reasoned, not confirmed) to false-negative
+#     on a PID that is genuinely alive but was never spawned under THIS
+#     bash's own MSYS/Git-Bash process tree, which would explain
+#     windows-latest CI's own symptom: a resume whose PID marker named a
+#     still-running process (started directly by the Python test harness,
+#     not forked from any MSYS shell) vanishing entirely within one
+#     second. `/proc/$pid` existence was added below as an extra "still
+#     alive" signal, on the theory that it is populated by walking the
+#     real OS process table rather than an MSYS-internal signal-delivery
+#     registration. CI DISPROVED this: the next run, with this check in
+#     place, showed the IDENTICAL failure, byte for byte (same symptom,
+#     same `bash -x` trace shape) -- so either MSYS's `/proc` does not
+#     expose this PID either, or the true mechanism is something else
+#     entirely. Left in place as a harmless, zero-cost (`[ -e ]` is a
+#     builtin) extra check for a platform where it DOES fire, but it is
+#     NOT a fix for the #1060 Windows CI failure and must not be read as
+#     one -- that failure's real cause is still unknown, and needs a real
+#     Windows host (or the next CI round's own fresh diagnostic) to find.
 _remember_pid_is_alive() {
     [ -e "/proc/$1" ] 2>/dev/null && return 0
     kill -0 "$1" 2>/dev/null

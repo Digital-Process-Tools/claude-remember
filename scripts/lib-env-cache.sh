@@ -426,13 +426,15 @@ _remember_env_cache_publish() {
     # #1079 CI evidence (windows-latest): this publish intermittently wrote
     # nothing at all even though every precondition above was satisfied and
     # a SIBLING mktemp in the same process (log.sh's own #668 flatten cache,
-    # same shared tmp dir) succeeded moments earlier -- consistent with a
-    # transient Windows filesystem hiccup (antivirus holding a lock on a
-    # just-created directory entry is the usual culprit for this class) that
-    # clears within milliseconds, REASONED rather than confirmed: no Windows
-    # host was available to single-step it. A short, bounded retry costs
-    # nothing on the overwhelmingly common first-try-succeeds path and
-    # nothing at all on a platform that never hits this.
+    # same shared tmp dir) succeeded moments earlier. A transient filesystem
+    # hiccup was the REASONED (not confirmed) guess, so a short, bounded
+    # retry was added here -- CI DISPROVED that guess: the next round, with
+    # this retry in place, showed the IDENTICAL failure (same assertion,
+    # same `systmp listing: []`). This is therefore NOT the fix for that
+    # failure and must not be read as one; the real mechanism is still
+    # unknown and needs a real Windows host to find. Left in place because
+    # it is harmless and free on the overwhelmingly common first-try-
+    # succeeds path (and a no-op on any platform that never fails here).
     _t=""
     for _ecp_try in 1 2 3; do
         _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) && break
