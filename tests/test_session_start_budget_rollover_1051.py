@@ -121,13 +121,77 @@ def _listed(out: str) -> list[str]:
 
 def _wait_for_cache(remember: Path, timeout: float = 5.0) -> None:
     """The publish that follows a cache MISS is a disowned background
-    child -- give it a moment to land before relying on a cache HIT."""
+    child -- give it a moment to land before relying on a cache HIT.
+
+    Waits for BOTH the cache and its manifest (#1051): the loader
+    (_remember_start_cache_context_load) requires both files to exist
+    before it will even consider the cache valid, and the background
+    publisher writes them as two separate mktemp+mv pairs, not one.
+    Waiting only for the cache file (the original #1051 flake) can
+    return the instant the first `mv` lands while the manifest's own
+    mktemp+mv is still in flight -- the very next SessionStart then
+    sees a cache with no manifest at all and, correctly by the
+    loader's own rules, treats that as a miss and rebuilds: several
+    extra forks that have nothing to do with the code under test."""
     cache = remember / "tmp" / "start-context.cache"
+    manifest = remember / "tmp" / "start-context.manifest"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if cache.exists():
+        if cache.exists() and manifest.exists():
             return
         time.sleep(0.05)
+
+
+# The mktemp+mv rebuild signature for the start-context cache/manifest pair
+# -- present on a genuine cache MISS, absent on a genuine HIT (which is a
+# single `cat`). #1051: the background publish that follows a MISS is a
+# disowned child that can still be mid-write (see _wait_for_cache above)
+# when the very next SessionStart starts, so "we waited, therefore it must
+# be a hit" is not a safe inference -- this checks the ACTUAL run's own
+# spawn list instead of trusting the wait.
+_CACHE_REBUILD_MARKERS = ("start-context.cache", "start-context.manifest")
+
+
+def _looks_like_cache_miss(spawn_list: list[str]) -> bool:
+    """True if `spawn_list` carries the mktemp+mv rebuild signature for
+    the start-context cache or manifest, i.e. this was actually a MISS
+    masquerading as the HIT a caller asked to measure."""
+    return any(
+        "mktemp" in line and any(marker in line for marker in _CACHE_REBUILD_MARKERS)
+        for line in spawn_list
+    )
+
+
+def test_looks_like_cache_miss_tells_a_rebuild_from_a_plain_hit():
+    """#1051 self-review: `_looks_like_cache_miss` is the thing the retry
+    loop below trusts to tell a genuine cache HIT from a MISS that merely
+    landed on the hit-measuring code path. Pin it directly against both
+    real spawn-list shapes seen on CI (job 124943950438) -- would this
+    check still pass if it always returned False (i.e. never detected
+    anything)? No: the positive case below requires it to return True."""
+    real_hit_spawns = [
+        "date +%s",
+        "git -C /tmp/project rev-parse --path-format=absolute --git-common-dir --git-dir",
+        "cat /tmp/project/.remember/tmp/start-context.cache",
+        "rm -f /tmp/project/.remember/tmp/session-start-ctx.1",
+    ]
+    real_miss_spawns = [
+        "date +%s",
+        "mktemp /tmp/project/.remember/tmp/start-context.cache.XXXXXX",
+        "mktemp /tmp/project/.remember/tmp/start-context.manifest.XXXXXX",
+        "wc -c /tmp/project/.remember/identity.md",
+        "mv -f /tmp/project/.remember/tmp/start-context.cache.vKERQ6 /tmp/project/.remember/tmp/start-context.cache",
+        "mv -f /tmp/project/.remember/tmp/start-context.manifest.07qkjn /tmp/project/.remember/tmp/start-context.manifest",
+    ]
+    assert not _looks_like_cache_miss(real_hit_spawns), "a plain cache HIT was reported as a miss"
+    assert _looks_like_cache_miss(real_miss_spawns), "a genuine cache rebuild went undetected"
+    # Negative control: an unrelated mktemp (e.g. config flattening, seen in
+    # the real branch spawn list above) must not itself trip the check --
+    # only a mktemp naming the start-context cache/manifest should.
+    unrelated_mktemp = ["mktemp /tmp//remember-config-XXXXXX"]
+    assert not _looks_like_cache_miss(unrelated_mktemp), (
+        "an unrelated mktemp was mistaken for a start-context cache rebuild"
+    )
 
 
 def _assert_no_stray_tmp_files(remember: Path) -> None:
@@ -256,12 +320,34 @@ def _archive_ref_tree(ref: str, dest: Path) -> None:
         tar.extractall(dest, **extract_kwargs)
 
 
-def _same_day_cache_served_spawns(tmp_path: Path, plugin_root: Path) -> list[str]:
+_MAX_CACHE_HIT_ATTEMPTS = 5
+
+
+def _same_day_cache_served_spawns(tmp_path: Path, plugin_root: Path, *, label: str) -> list[str]:
     """One miss (+ background publish) followed by a SAME-day SessionStart
     that hits the cache, with every external process the warm run forks
     recorded via the shared #679 counting harness. Same calendar day on
     purpose: a rollover takes the mismatch-recovery branch, which is not
-    the common path this pin is about."""
+    the common path this pin is about.
+
+    #1051: `_wait_for_cache` returning is NOT proof the measured run will
+    actually be a cache HIT -- the disowned background publisher can still
+    be mid-write for either file right up to (and even past) the instant
+    both paths exist on disk (a filesystem can report a file as existing
+    before every byte of a preceding `mv` into it is visible to a
+    subsequent `-nt`/`stat` on another process), so the measured run can
+    legitimately land on the rebuild path instead of the cache-hit path it
+    was meant to measure -- exactly the branch (44) vs main (39) mismatch
+    seen on CI (job 124943950438): the branch run's own spawn list showed
+    the mktemp+mv rebuild signature, the main run's showed a plain `cat`.
+    Comparing a HIT to a MISS is comparing different code paths, not a
+    real regression.
+
+    Retry the measured run itself (bounded) until its OWN spawn list is a
+    genuine HIT (checked via `_looks_like_cache_miss`, not merely "did we
+    wait long enough") before handing spawns back for comparison; if it
+    never lands a hit, fail with a clear, specific message rather than
+    silently comparing a hit to a miss."""
     bodies = {
         "identity.md": "IDENTITY-SPAWNPIN\n",
         "core-memories.md": "CORE-SPAWNPIN\n",
@@ -289,14 +375,29 @@ def _same_day_cache_served_spawns(tmp_path: Path, plugin_root: Path) -> list[str
     _run({})  # miss: live render + disowned background publish
     _wait_for_cache(remember)
 
-    log = tmp_path / "spawn.log"
-    shims = make_shim_dir(tmp_path, log)
-    out = _run({
-        "SPAWN_LOG": str(log),
-        "PATH": f"{shims}{os.pathsep}{env['PATH']}",
-    })
-    assert "NOW-SPAWNPIN" in out, "positive control: the cache-served run produced no output at all"
-    return spawns(log)
+    last_spawns: list[str] = []
+    for attempt in range(_MAX_CACHE_HIT_ATTEMPTS):
+        log = tmp_path / f"spawn-{attempt}.log"
+        shims = make_shim_dir(tmp_path, log)
+        out = _run({
+            "SPAWN_LOG": str(log),
+            "PATH": f"{shims}{os.pathsep}{env['PATH']}",
+        })
+        assert "NOW-SPAWNPIN" in out, (
+            f"positive control: the {label} cache-served run produced no output at all"
+        )
+        last_spawns = spawns(log)
+        if not _looks_like_cache_miss(last_spawns):
+            return last_spawns
+        time.sleep(0.1 * (attempt + 1))
+
+    pytest.fail(
+        f"{label}: never got a genuine cache HIT after {_MAX_CACHE_HIT_ATTEMPTS} attempts -- "
+        f"every measured run rebuilt the start-context cache/manifest instead (the mktemp+mv "
+        f"signature was present each time), so comparing spawn counts would compare a MISS to "
+        f"who knows what, not the HIT path this test exists to pin. Last attempt's spawns:\n"
+        f"{last_spawns}"
+    )
 
 
 def test_cache_served_spawn_count_does_not_exceed_main(tmp_path):
@@ -330,8 +431,8 @@ def test_cache_served_spawn_count_does_not_exceed_main(tmp_path):
             f"read its tree in this checkout (likely shallow): {exc.stderr!r}"
         )
 
-    branch_spawns = _same_day_cache_served_spawns(tmp_path / "branch", REPO_ROOT)
-    main_spawns = _same_day_cache_served_spawns(tmp_path / "main", main_tree)
+    branch_spawns = _same_day_cache_served_spawns(tmp_path / "branch", REPO_ROOT, label="branch")
+    main_spawns = _same_day_cache_served_spawns(tmp_path / "main", main_tree, label="main")
 
     assert main_spawns, "positive control: main's own cache-served run forked nothing at all"
     assert len(branch_spawns) <= len(main_spawns), (
