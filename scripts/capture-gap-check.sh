@@ -121,9 +121,11 @@ if [ -n "${PROJECT_DIR:-}" ] && [ -d "${PROJECT_DIR:-}" ] \
     if command -v _remember_env_cache_load >/dev/null 2>&1 \
         && _remember_env_cache_load && [ -n "${REMEMBER_RECOVERY_ENABLED:-}" ]; then
         _REMEMBER_FAST=1
-        # Lazy log(): the ONE remaining call site that needs log.sh's real
-        # definitions is the rare case-divergence branch further down --
-        # same shape, same rationale, as post-tool-hook.sh:343-359.
+        # Lazy log(): a handful of rare call sites further down (a
+        # case-divergence mismatch, a pluginless-SDK exclusion cap, the
+        # no-session_id skip message) still need log.sh's real definitions.
+        # The lazy stub works the same regardless of which one fires first
+        # -- same shape, same rationale, as post-tool-hook.sh:343-359.
         log() {
             unset -f log
             source "$PLUGIN_ROOT/scripts/log.sh" 2>/dev/null
@@ -166,6 +168,27 @@ else
 fi
 
 CURRENT_SESSION_ID="${1:-}"
+
+# #1060 review: session-start-hook.sh's own per-session PID marker
+# (REMEMBER_DIR/tmp/deferred-<id>.pid) names this process once it is
+# backgrounded, and nothing ever removed it on a normal finish -- an
+# unbounded, never-cleaned file per session id, the same class of leak
+# this issue's own #362-style tmp fix elsewhere in this diff is about.
+# Removed here, under an EXIT trap so every return/exit path is covered,
+# and only when the file STILL names OUR OWN pid: a session that resumed
+# again and relaunched (this file's own stale-PID recovery) owns a NEWER
+# file by the time this trap fires for the OLDER, now-finishing process,
+# and that newer file must survive this cleanup untouched.
+if [ -n "$CURRENT_SESSION_ID" ]; then
+    _remember_deferred_pid_file="$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID}.pid"
+    _remember_cleanup_deferred_pid_file() {
+        [ -f "$_remember_deferred_pid_file" ] || return 0
+        [ "$(<"$_remember_deferred_pid_file")" = "$$" ] 2>/dev/null \
+            && rm -f "$_remember_deferred_pid_file" 2>/dev/null
+        return 0
+    }
+    trap _remember_cleanup_deferred_pid_file EXIT
+fi
 
 # PROJECT_PATH_SLUG/SESSIONS_DIR: a pure function of PROJECT_DIR
 # (session-start-hook.sh's own comment on this, above its matching

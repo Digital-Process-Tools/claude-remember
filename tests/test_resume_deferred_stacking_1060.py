@@ -119,6 +119,46 @@ def test_a_resume_for_a_session_whose_deferred_phase_is_still_alive_does_not_rel
         sleeper.wait(timeout=10)
 
 
+def test_the_deferred_phases_own_pid_file_is_removed_when_it_finishes(tmp_path):
+    """Adjacent finding (self-review on #1060): the PID marker this guard
+    relies on was never cleaned up on a normal finish -- an unbounded,
+    never-removed file per session id, the same class of #362-style tmp
+    leak #1079 fixes elsewhere in this same change. A deferred phase that
+    runs to completion (REMEMBER_DEFER=0, so this test does not have to
+    poll a background process) must remove its own marker rather than
+    leave it behind forever.
+    """
+    # REMEMBER_DEFER=0 (synchronous inline) never writes a PID file at all
+    # -- that write sits only in the backgrounded `else` branch, so this
+    # must use the ordinary background path to exercise the cleanup this
+    # test is actually about.
+    home, project, remember = _store(tmp_path)
+    env = _env(home, project, remember, os.environ["PATH"])
+
+    session_id = "44444444-0000-4000-8000-000000001060"
+    pid_file = remember / "tmp" / f"deferred-{session_id}.pid"
+    # Durable proof the deferred phase actually ran to completion, since
+    # the PID file itself is the thing under test and may never be
+    # observed present even when the fix is working correctly.
+    slug_record = remember / "tmp" / "session-slug"
+
+    result = _run_session_start(env, session_id, "startup")
+    assert result.returncode == 0, result.stderr[-2000:]
+
+    deadline = time.time() + 15
+    while time.time() < deadline and not slug_record.is_file():
+        time.sleep(0.1)
+    assert slug_record.is_file(), (
+        "precondition: the deferred phase never finished -- cannot tell "
+        "cleanup from a run that simply never happened"
+    )
+
+    assert not pid_file.exists(), (
+        "a deferred phase that ran to completion left its own PID marker "
+        "behind instead of cleaning it up on exit"
+    )
+
+
 def test_a_fresh_sessions_deferred_phase_still_launches_normally(tmp_path):
     """Positive control, paired with the test above: a session with NO
     pre-existing PID file at all (ordinary first start) must still get a
@@ -135,18 +175,28 @@ def test_a_fresh_sessions_deferred_phase_still_launches_normally(tmp_path):
     pid_file = remember / "tmp" / f"deferred-{session_id}.pid"
     assert not pid_file.exists(), "precondition: no PID file should exist yet"
 
+    # The PID file is a transient claim, not a durable record -- the
+    # deferred phase removes its OWN marker on a normal finish (self-review
+    # on #1060, tests/test_resume_deferred_stacking_1060.py's own cleanup
+    # test), so a trivial fixture can finish and clean up between this
+    # poll's checks, leaving the file briefly or never observed even though
+    # a launch genuinely happened. `session-slug` is a durable record the
+    # deferred phase always writes (_remember_write_slug_record,
+    # unconditional) and never removes -- proof a launch occurred that
+    # survives the race the pid file alone cannot.
+    slug_record = remember / "tmp" / "session-slug"
+
     result = _run_session_start(env, session_id, "startup")
     assert result.returncode == 0, result.stderr[-2000:]
 
     deadline = time.time() + 15
-    while time.time() < deadline and not pid_file.is_file():
+    while time.time() < deadline and not slug_record.is_file():
         time.sleep(0.1)
-    assert pid_file.is_file(), (
-        "positive control: a fresh session with no existing PID file never "
-        "got one written -- the harness cannot see a launch happen at all"
+    assert slug_record.is_file(), (
+        "positive control: a fresh session never produced the deferred "
+        "phase's own unconditional slug record -- the harness cannot see "
+        "a launch happen at all"
     )
-    pid_text = pid_file.read_text(encoding="utf-8").strip()
-    assert pid_text and pid_text.isdigit(), f"PID file does not hold a PID: {pid_text!r}"
 
 
 def test_a_resume_for_a_session_whose_pid_file_is_stale_relaunches_it(tmp_path):
@@ -166,18 +216,20 @@ def test_a_resume_for_a_session_whose_pid_file_is_stale_relaunches_it(tmp_path):
     assert dead.poll() is not None, "precondition: the stand-in process must have exited"
     pid_file.write_text(str(dead.pid), encoding="utf-8")
 
+    # Same transience caveat as the fresh-session positive control above:
+    # the pid file the guard reads can be gone again by the time this polls,
+    # once the relaunched deferred phase finishes and cleans up its own
+    # marker. `session-slug` is the durable signal a relaunch actually
+    # happened.
+    slug_record = remember / "tmp" / "session-slug"
+
     result = _run_session_start(env, session_id, "resume")
     assert result.returncode == 0, result.stderr[-2000:]
 
     deadline = time.time() + 15
-    while time.time() < deadline:
-        current = pid_file.read_text(encoding="utf-8").strip() if pid_file.is_file() else ""
-        if current and current != str(dead.pid):
-            break
+    while time.time() < deadline and not slug_record.is_file():
         time.sleep(0.1)
-    else:
-        pytest.fail(
-            "a resume for a session whose PID file named a DEAD process "
-            "never relaunched the deferred phase -- the guard is not "
-            f"stale-safe (pid file still: {pid_file.read_text(encoding='utf-8') if pid_file.is_file() else '<missing>'!r})"
-        )
+    assert slug_record.is_file(), (
+        "a resume for a session whose PID file named a DEAD process never "
+        "relaunched the deferred phase -- the guard is not stale-safe"
+    )

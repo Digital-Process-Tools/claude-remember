@@ -485,6 +485,24 @@ SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 # live case; a dead PID (crash, kill) is simply overwritten below. No new
 # fork on this path: `[ -f ]`/`$(<file)`/`kill -0` are builtins, and `kill`
 # does not count as "running a process" the way an external binary would.
+# Two limitations survive, and neither is new to this codebase:
+#
+#   * Check-then-act, not a lock: two SessionStarts for the SAME session id
+#     landing close enough together can both read "no live deferred phase"
+#     before either writes its own PID, so both launch and the second
+#     write clobbers the first PID -- the stacking #1060 reports, narrowed
+#     from "every resumed turn" to "two starts that land within this
+#     window." An atomic claim (a lock directory, the primitive
+#     lib-lock.sh already carries) would close it, at the cost of sourcing
+#     a file this hot path does not otherwise need; left as a known gap
+#     rather than added here.
+#   * `kill -0`-based staleness detection cannot tell a dead holder's PID
+#     from an unrelated LIVE process the OS has since reassigned the same
+#     PID to ("PID recycling") -- scripts/lib-lock.sh's own
+#     `_lock_try_steal` carries the identical limitation and documents it
+#     as "an accepted, general limitation rather than a fix" (see that
+#     file's header comment and tests/test_cross_host_lock_contract_491.py).
+#     This guard is simpler than a real lock and inherits the same tradeoff.
 _remember_deferred_already_running() {
     local _f="$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID:-_}.pid" _pid
     [ -f "$_f" ] || return 1
