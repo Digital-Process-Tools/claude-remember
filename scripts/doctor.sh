@@ -1049,7 +1049,7 @@ if [ -s "$_SUMMARY_FAILURE_MARKER" ]; then
     fi
     unset _SF_FILES
     echo "FAIL summarizer: last attempt failed${_SF_DETAIL:+: $_SF_DETAIL}"
-    # Same marker family _isolation_may_be_the_cause (pipeline/haiku.py) scans
+    # Same marker family _isolation_may_be_the_cause (pipeline/summarizer.py) scans
     # for -- an expired login reads as a generic failure here, so this is the
     # one lowercased substring match worth doing in bash rather than naming
     # a specific remedy for every kind of failure, which would be as wrong
@@ -1108,7 +1108,7 @@ unset _remember_ss_glob_dir _SS_LATEST_LOG _SS_LAST_LINE _ss_f
 
 # #898, round 4: the "Legacy recovery-token config (#860)" section that used
 # to live here is removed entirely. It scanned the daily log for a "NOTICE:"
-# line pipeline/haiku.py no longer writes (#898 round 4 removed the presence
+# line pipeline/summarizer.py no longer writes (#898 round 4 removed the presence
 # check that produced it) -- this diagnostic would only ever report "OK"
 # from here on, which is not a check worth keeping.
 

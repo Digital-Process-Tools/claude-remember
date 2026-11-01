@@ -4,14 +4,14 @@ The nested ``claude -p`` was kept out of the plugin by two signals, and both can
 fail to arrive:
 
 * ``--setting-sources ''`` (#202) registers none of the user's hooks in the
-  child. An older CLI rejects the flag, and ``haiku.call_haiku`` then fails OPEN
+  child. An older CLI rejects the flag, and ``summarizer.call_haiku`` then fails OPEN
   — deliberately, because the alternative is no saves ever again — so the retry
   runs with the user's hooks live.
 * ``REMEMBER_NESTED_SUMMARIZER`` (#205) makes this plugin's own hooks no-op in
   the child. It is an environment variable, and a host that redacts env into
   spawned hook subprocesses erases it. This repo has precedent: #131 was
   ``CLAUDE_CODE_OAUTH_TOKEN``, the host's own OAuth credential, going missing
-  exactly that way (``pipeline.haiku`` never lists it in the parent-session
+  exactly that way (``pipeline.summarizer`` never lists it in the parent-session
   strip, ``_without_session_env``, so the child inherits it).
 
 When both fail there is nothing left. @ehutchinsonSFDC reported the result on

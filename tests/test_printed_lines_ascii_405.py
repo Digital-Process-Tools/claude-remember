@@ -28,7 +28,7 @@ Comments are untouched; the em-dashes and arrows in this repo's prose are not
 the subject of this rule.
 
 Boundary decision (#405's own): pipeline/*.py is in scope too, and for a
-sharper reason than cosmetics. pipeline/log.py's log() and pipeline/haiku.py's
+sharper reason than cosmetics. pipeline/log.py's log() and pipeline/summarizer.py's
 _warn() fall back to print(..., file=sys.stderr) exactly like scripts/log.sh
 falls back to echo ... >&2 -- but Python's print() DOES perform an encode
 step against the console's codepage (unlike bash's echo), so a non-ASCII
@@ -275,7 +275,7 @@ def test_scan_finds_printed_calls_in_files_known_to_have_them():
     _warn()/log()/print() or raise with a message must contribute at least
     one string, so a broken parse of one specific file cannot pass by
     silently contributing nothing."""
-    expect_nonzero = {"haiku.py", "log.py", "spawn_guard.py"}
+    expect_nonzero = {"summarizer.py", "log.py", "spawn_guard.py"}
     seen = {
         f.name: len(_printed_python_strings(f))
         for f in sorted(PIPELINE_DIR.glob("*.py"))
@@ -288,7 +288,7 @@ def test_scan_finds_printed_calls_in_files_known_to_have_them():
 
 
 def test_no_printed_pipeline_string_contains_non_ascii():
-    """MUST FIRE (before the fix): pipeline/haiku.py's _warn() calls and
+    """MUST FIRE (before the fix): pipeline/summarizer.py's _warn() calls and
     pipeline/spawn_guard.py's raised SummarizerSpawnDeclined message carried
     em-dashes, and pipeline/types.py's TokenUsage.__str__() (consumed by
     pipeline/log.py's log_usage()) carried an arrow. Each of those reaches
