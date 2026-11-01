@@ -1252,10 +1252,35 @@ _remember_start_cache_context_load() {
     # why mtimes alone cannot catch this.
     [ "$_mf_version" = "$_REMEMBER_CACHE_FORMAT_VERSION" ] || return 1
 
-    local _served
-    _served="$(cat "$_cache")"
-    [ -n "$_served_marker" ] && printf '%s' "${#_served}" > "$_served_marker" 2>/dev/null
-    printf '%s' "$_served"
+    # Direct `cat`, not a command substitution: this stdout IS the function's
+    # contract (test_start_context_cache_668.py asserts it byte-identical to
+    # a live render, trailing newlines included), and a `$(...)` capture
+    # strips trailing newlines bash's own stripping rules would only apply
+    # again, redundantly, once this output lands inside the SessionStart
+    # body's own outer command substitution in session-start-hook.sh -- NOT
+    # when this function is called directly, as the cache test above does.
+    # A marker write needs a SEPARATE capture purely to count stripped-tail
+    # bytes (self-review finding, #1051): that count must match what the
+    # outer substitution will actually embed, which already strips the same
+    # trailing newlines this second read strips.
+    if [ -n "$_served_marker" ]; then
+        local _served
+        _served="$(cat "$_cache")"
+        # mktemp + mv into place, not a plain `>` onto the predictable
+        # PID-named path above: a bare redirect follows a symlink planted
+        # at that exact name and truncates whatever it points to before a
+        # byte is written, the same hazard _remember_start_cache_context_
+        # finish_publish's own mv-into-place already avoids for the cache
+        # file itself. mktemp creates an unpredictably-named, already-0600
+        # file; `mv` replaces whatever sits at the target via rename(),
+        # never opening (and so never following) it.
+        local _served_marker_tmp
+        _served_marker_tmp=$(mktemp "${_served_marker}.XXXXXX" 2>/dev/null) && {
+            printf '%s' "${#_served}" > "$_served_marker_tmp" 2>/dev/null
+            mv -f "$_served_marker_tmp" "$_served_marker" 2>/dev/null
+        }
+    fi
+    cat "$_cache"
     return 0
 }
 
@@ -1394,7 +1419,11 @@ unset _REMEMBER_BUDGET_EXCLUDE
 # is confirmed byte-identical to a fresh render. ${var:off:len} and string
 # equality are both linear. A mismatch (a memory file changed between the
 # two renders) leaves the body untouched and logs it -- the pre-#842 shape,
-# never a cut at a guessed offset.
+# never a cut at a guessed offset -- UNLESS the loader already told us
+# exactly how many bytes it served (a cache HIT, #1051): a cache can
+# legitimately serve a PRIOR calendar day's bytes, which can never match a
+# TODAY-dated re-render, and in that one case the known split is trusted
+# instead of giving up. See this function's own body for that fallback.
 #
 # Cost: none on the common path. An under-budget body returns at the length
 # check below, before any render, fork or copy; only an over-budget body
@@ -1417,21 +1446,28 @@ unset _REMEMBER_BUDGET_EXCLUDE
 # this cache's own, this file used that the scanner holds submissions on).
 _remember_apply_session_start_budget() {
     local _outvar="$1" _max="$2" _text="$3"
-    if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
-    [ "$_max" -gt 0 ] || return 0
     # byte length, not a locale-dependent character count (see header above)
     local LC_ALL=C
-    [ "${#_text}" -gt "$_max" ] || return 0
 
-    # #1051: a marker _remember_start_cache_context_load (see its own
-    # header) drops only on a cache HIT, under this same PID. Read once and
-    # removed immediately -- single-use, never trusted by a later call.
+    # #1051: consumed FIRST, before any of the early returns below -- this
+    # function is the marker's only reader, and gating the read behind the
+    # over-budget check (an earlier version of this fix did exactly that)
+    # left it unconsumed, and so left permanently on disk, on every call
+    # where the body stayed under budget (review finding: the common case,
+    # since that is the point of the cache) or where MAX_BYTES is disabled
+    # outright. Reading it here for every call this function receives --
+    # one per non-compact SessionStart -- is the only placement that always
+    # runs.
     local _served_marker="" _served_bytes=""
     [ -n "${REMEMBER_DIR:-}" ] && _served_marker="$REMEMBER_DIR/tmp/start-context.served-bytes.$$"
-    if [ -n "$_served_marker" ] && [ -f "$_served_marker" ]; then
+    if [ -n "$_served_marker" ] && [ -f "$_served_marker" ] && [ ! -L "$_served_marker" ]; then
         _served_bytes="$(<"$_served_marker")"
         rm -f "$_served_marker" 2>/dev/null
     fi
+
+    if [ -z "$_max" ] || [ "${_max#*[!0-9]}" != "$_max" ]; then return 0; fi
+    [ "$_max" -gt 0 ] || return 0
+    [ "${#_text}" -gt "$_max" ] || return 0
 
     # Both captures strip trailing newlines the same way the body's own
     # capture in session-start-hook.sh did, and the memory section is the
