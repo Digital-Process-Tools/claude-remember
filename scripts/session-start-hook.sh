@@ -514,6 +514,28 @@ SESSIONS_DIR="$(claude_projects_dir)/${PROJECT_PATH_SLUG}"
 #     900 = 15min) is treated as stale regardless of what `kill -0` says,
 #     so a PID-recycling false-positive cannot block recovery for that
 #     session id indefinitely -- only until the bound passes.
+#   * `kill -0` alone is suspected (REASONED, not directly confirmed --
+#     no Windows host was available to prove it; see #1079's own CI
+#     evidence of the SYMPTOM, not the mechanism) to false-negative on a
+#     PID that is genuinely alive but was never spawned under THIS bash's
+#     own MSYS/Git-Bash process tree: windows-latest CI showed a resume
+#     whose PID marker named a still-running process (started directly by
+#     the Python test harness, not forked from any MSYS shell) vanish
+#     entirely within one second -- consistent with the guard reading
+#     that PID as dead, falling through to the launch branch, overwriting
+#     the marker, and then (once the freshly-launched child finished)
+#     deleting it via its own normal-exit cleanup. `/proc` is populated by
+#     walking the real OS process table, not by an MSYS-internal signal-
+#     delivery registration, so it can see a PID `kill` cannot. Tried
+#     FIRST, as an extra "still alive" signal `kill -0` alone would miss
+#     -- never as a replacement, since a host with no `/proc` (macOS)
+#     must still fall back to `kill -0` exactly as before. Builtin-only
+#     (`[ -e ]`), so this costs nothing on the hot path.
+_remember_pid_is_alive() {
+    [ -e "/proc/$1" ] 2>/dev/null && return 0
+    kill -0 "$1" 2>/dev/null
+}
+
 _remember_deferred_already_running() {
     local _f="$REMEMBER_DIR/tmp/deferred-${CURRENT_SESSION_ID:-_}.pid" _pid _mtime _now
     [ -f "$_f" ] || return 1
@@ -527,12 +549,12 @@ _remember_deferred_already_running() {
     [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]] || _mtime=$(stat -f %m "$_f" 2>/dev/null) || _mtime=""
     if [ -n "$_mtime" ] && [[ "$_mtime" != *[!0-9]* ]]; then
         _now=$(date +%s)
-        if [ $(( _now - 10#$_mtime )) -ge "${REMEMBER_DEFERRED_PID_MAX_AGE:-900}" ]; then
+        if [ $(( 10#$_now - 10#$_mtime )) -ge "${REMEMBER_DEFERRED_PID_MAX_AGE:-900}" ]; then
             rm -f "$_f" 2>/dev/null
             return 1
         fi
     fi
-    kill -0 "$_pid" 2>/dev/null && return 0
+    _remember_pid_is_alive "$_pid" && return 0
     rm -f "$_f" 2>/dev/null
     return 1
 }

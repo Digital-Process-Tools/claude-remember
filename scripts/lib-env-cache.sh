@@ -242,10 +242,12 @@ _remember_env_cache_load() {
             # as "no answer" (empty _recovery) rather than misreading the
             # whole stamp value as the recovery flag.
             _stamp="${_line#*=}"
-            case "$_stamp" in
-                *:*) _recovery="${_stamp#*:}"; _stamp="${_stamp%%:*}" ;;
-                *) _recovery="" ;;
-            esac
+            if [ "${_stamp#*:}" != "$_stamp" ]; then
+                _recovery="${_stamp#*:}"
+                _stamp="${_stamp%%:*}"
+            else
+                _recovery=""
+            fi
         elif [ "${_line#REMEMBER_SAVE_COOLDOWN=}" != "$_line" ]; then
             _cooldown="${_line#*=}"
         elif [ "${_line#REMEMBER_DELTA_THRESHOLD=}" != "$_line" ]; then
@@ -421,7 +423,22 @@ _remember_env_cache_publish() {
     # this repo relies on (GNU and BSD/macOS alike) -- no umask needed, and no
     # trailing suffix after the X's (BSD mktemp only substitutes a run of X's
     # at the very end of the template; anything after is left literal).
-    _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) || return 0
+    # #1079 CI evidence (windows-latest): this publish intermittently wrote
+    # nothing at all even though every precondition above was satisfied and
+    # a SIBLING mktemp in the same process (log.sh's own #668 flatten cache,
+    # same shared tmp dir) succeeded moments earlier -- consistent with a
+    # transient Windows filesystem hiccup (antivirus holding a lock on a
+    # just-created directory entry is the usual culprit for this class) that
+    # clears within milliseconds, REASONED rather than confirmed: no Windows
+    # host was available to single-step it. A short, bounded retry costs
+    # nothing on the overwhelmingly common first-try-succeeds path and
+    # nothing at all on a platform that never hits this.
+    _t=""
+    for _ecp_try in 1 2 3; do
+        _t=$(mktemp "${_f}.XXXXXX" 2>/dev/null) && break
+        _t=""
+    done
+    [ -n "$_t" ] || return 0
     local _ecp_mem_proj="${MEMORY_PROJECT_DIR:-}" _c _e
     [ -n "$_ecp_mem_proj" ] || _ecp_mem_proj="$PROJECT_DIR"
     {
