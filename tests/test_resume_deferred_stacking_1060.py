@@ -383,3 +383,104 @@ def test_a_resume_for_a_session_whose_marker_is_old_and_names_a_live_but_unrelat
         "(but unrelated) pid never relaunched the deferred phase -- "
         "there is no age bound on the PID-recycling guard"
     )
+
+def test_a_real_backgrounded_deferred_phase_blocks_its_own_resume_end_to_end(tmp_path):
+    """#1086 review (item 1): every other test in this file pre-seeds the PID
+    marker itself (a stand-in process this test starts and controls) -- none
+    of them depends on session-start-hook.sh's OWN marker write
+    (`printf '%s' "$!" > .../deferred-<id>.pid`) ever having happened for
+    real. Self-review on #1086 confirmed this directly: deleting that one
+    write from the production script left all five other tests in this file
+    green.
+
+    This test drives the whole thing end to end with the REAL production
+    code and no test-seeded marker: a first SessionStart backgrounds a REAL
+    deferred phase, slowed down deterministically with
+    REMEMBER_TEST_DEFER_DELAY (a test-only knob, a no-op in production --
+    see capture-gap-check.sh's own comment on it); session-start-hook.sh's
+    own write must name that real, still-sleeping deferred phase's pid; a
+    second (resume) start for the SAME session issued WHILE it is still
+    alive must not relaunch a second one; once it finishes (and cleans up
+    its own marker), a THIRD start must launch again.
+    """
+    home, project, remember = _store(tmp_path)
+    env = _env(home, project, remember, os.environ["PATH"])
+    env["REMEMBER_TEST_DEFER_DELAY"] = "3"
+
+    session_id = "66666666-0000-4000-8000-000000001060"
+    pid_file = remember / "tmp" / f"deferred-{session_id}.pid"
+    slug_record = remember / "tmp" / "session-slug"
+    assert not pid_file.exists(), "precondition: no PID file should exist yet"
+    assert not slug_record.exists(), "precondition: no deferred phase has run yet"
+
+    result = _run_session_start(env, session_id, "startup")
+    assert result.returncode == 0, result.stderr[-2000:]
+
+    deadline = time.time() + 10
+    while time.time() < deadline and not pid_file.is_file():
+        time.sleep(0.05)
+    assert pid_file.is_file(), (
+        "a backgrounded SessionStart never wrote its own deferred-phase PID "
+        "marker -- the guard this test is about has nothing real to read"
+    )
+    first_pid = pid_file.read_text(encoding="utf-8").strip()
+    assert first_pid, "precondition: the PID marker is empty"
+
+    # Issue a RESUME for the SAME session WHILE the first deferred phase is
+    # still inside its own REMEMBER_TEST_DEFER_DELAY sleep.
+    result = _run_session_start(env, session_id, "resume")
+    assert result.returncode == 0, result.stderr[-2000:]
+    time.sleep(SETTLE_SECONDS)
+
+    assert pid_file.is_file(), (
+        "the PID marker vanished between the first start and the resume -- "
+        "either the first deferred phase finished faster than this test's "
+        "own delay accounts for, or something removed it early"
+    )
+    assert pid_file.read_text(encoding="utf-8").strip() == first_pid, (
+        "a resume for a session whose REAL, still-running deferred phase "
+        "had not finished relaunched a second one instead of being skipped "
+        f"-- the marker no longer names it (was {first_pid!r})"
+    )
+    assert not slug_record.exists(), (
+        "a resume for a session whose real deferred phase was still alive "
+        "launched a SECOND one anyway -- its own unconditional session-slug "
+        "record appeared"
+    )
+
+    # Let the first (real) deferred phase finish and clean up its own
+    # marker -- same polling shape as this file's own PID-cleanup test
+    # above, for the same CI-flake reason (a real, if normally short,
+    # window between the slug write and the EXIT trap actually running).
+    deadline = time.time() + 15
+    while time.time() < deadline and pid_file.exists():
+        time.sleep(0.1)
+    assert not pid_file.exists(), (
+        "the real, first deferred phase never cleaned up its own PID "
+        "marker on a normal finish"
+    )
+    deadline = time.time() + 5
+    while time.time() < deadline and not slug_record.is_file():
+        time.sleep(0.05)
+    assert slug_record.is_file(), (
+        "the real, first deferred phase never finished at all -- cannot "
+        "tell a genuine completion from one that simply never ran"
+    )
+
+    # Reset the durable completion signal so the THIRD start's own launch is
+    # unambiguous: session-slug is overwritten, not accumulated, so its mere
+    # presence after the third start would not by itself distinguish a
+    # fresh launch from the first one's own leftover record.
+    slug_record.unlink()
+
+    result = _run_session_start(env, session_id, "resume")
+    assert result.returncode == 0, result.stderr[-2000:]
+
+    deadline = time.time() + 15
+    while time.time() < deadline and not slug_record.is_file():
+        time.sleep(0.1)
+    assert slug_record.is_file(), (
+        "a resume for a session whose real deferred phase had already "
+        "finished (and cleaned up its own marker) never launched a THIRD "
+        "deferred phase"
+    )
