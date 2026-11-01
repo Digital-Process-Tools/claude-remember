@@ -101,6 +101,63 @@ def test_a_haiku_rejected_line_is_also_counted(tmp_path):
     assert "WARN 1 span(s) dropped by a reject gate" in result.stdout, result.stdout
 
 
+def test_a_summarizer_rejected_line_is_also_counted(tmp_path):
+    """Final-review finding: #1085 (merged into this branch) renamed the
+    summarize-step's own log tag from the pre-existing [validate]/[haiku]
+    pair to [summarizer] (save-session.sh:936, `log "summarizer" "REJECTED
+    (provider: ...; not a summary -- refusal or clarification): ..."`) --
+    on current code this tag matched neither of doctor.sh's two patterns,
+    so a dropped span logged under the new tag reported "OK No dropped
+    summarizer spans" while a span was in fact dropped, the exact silent
+    regression this whole section exists to prevent."""
+    home, project, remember, _session_dir = _healthy_baseline(tmp_path)
+    logs = remember / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "memory-2026-10-20.log").write_text(
+        "13:10:00 [summarizer] REJECTED (provider: claude; not a summary -- "
+        "refusal or clarification): I can't help with that\n",
+        encoding="utf-8",
+    )
+
+    result = _run(home, project, remember)
+
+    assert result.returncode == 0, result.stderr
+    assert "WARN 1 span(s) dropped by a reject gate" in result.stdout, (
+        "a [summarizer] REJECTED line (#1085's renamed tag) went uncounted:\n"
+        + result.stdout
+    )
+
+
+def test_an_ndc_rejected_line_is_not_counted_as_dropped(tmp_path):
+    """Negative control for the fix above, pinned separately from the
+    positive one: [ndc] REJECTED (save-session.sh's compression step,
+    :1304/:1306) is deliberately excluded from this section's pattern.
+    Unlike [validate]/[haiku]/[summarizer], an ndc rejection leaves now.md
+    untouched (save-session.sh's own comment at :1229: "now.md is left
+    intact so the next round retries") -- the span is retried next round,
+    never dropped, so counting it here would be a false positive, not a
+    fix. Paired with the must-fire test above per this repo's own
+    CLAUDE.md: a check that always reports clean would pass this test for
+    the wrong reason without the positive case next to it."""
+    home, project, remember, _session_dir = _healthy_baseline(tmp_path)
+    logs = remember / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "memory-2026-10-21.log").write_text(
+        "14:20:00 [ndc] REJECTED (provider: claude; not a summary -- "
+        "refusal or clarification): I can't compress that\n",
+        encoding="utf-8",
+    )
+
+    result = _run(home, project, remember)
+
+    assert result.returncode == 0, result.stderr
+    assert "OK   No dropped summarizer spans recorded" in result.stdout, (
+        "an [ndc] REJECTED line was counted as a dropped span, but ndc "
+        "rejections are retried (now.md left intact), not dropped:\n"
+        + result.stdout
+    )
+
+
 def test_counts_sum_across_multiple_logs_not_only_the_newest(tmp_path):
     """Same cross-file-sum shape #870's own section pins for "call-haiku
     error" lines: a dropped span from an OLDER daily log must still be

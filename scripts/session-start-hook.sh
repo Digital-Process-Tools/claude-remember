@@ -190,7 +190,19 @@ if [ ! -t 0 ]; then
         _line=""
     done
     if [ "$_hook_stdin_truncated" -eq 1 ]; then
-        cat <&0 >/dev/null 2>&1 || true
+        # #1047 round 5 (final review): this used to drain the REST of stdin
+        # synchronously, in the foreground, with no time bound at all -- the
+        # per-line `read -t 1` loop above is bounded, but this bulk drain was
+        # not, so a writer that holds stdin open (never closes its write end)
+        # made the hook hang forever rather than returning once the cap was
+        # hit. Observed: an 8s-holding writer cost the hook 8s once truncation
+        # fired, where the under-cap path (no writer held open) returns within
+        # read -t 1's own 1s. Backgrounded and disowned, the same shape every
+        # other detach site in this file already uses (before_session_start's
+        # deferred dispatch, just below) -- fd 3 is explicitly closed (`3>&-`)
+        # rather than left to leak into the background job, matching that
+        # convention's own fd hygiene.
+        cat <&0 >/dev/null 2>&1 3>&- & disown 2>/dev/null || true
     fi
 fi
 if [ "$_hook_stdin_lc_all_was_set" -eq 1 ]; then
@@ -409,12 +421,30 @@ fi
 # session could never have earned any. Writing a second, cheaper marker
 # here -- at the START of every session, under this same store, for THIS
 # session's own id -- gives even a tool-less session one piece of roster
-# evidence by the time it could ever become a later session's PREV_ID. A
-# plain redirect, no subprocess fork, to stay on the hot synchronous path
-# the way #1040's own comment on this file requires.
+# evidence by the time it could ever become a later session's PREV_ID.
+#
+# #1046 final review: this used to land in the SAME folder
+# (capture-alive.d) post-tool-hook.sh writes into for "a tool actually ran
+# under this store" -- the #200 capture-gap check's own capture_was_seen()
+# reads that folder as ITS evidence too, so a session that only ever hit
+# THIS marker (no tool call at all) made a real capture gap (hooks never
+# registered, so neither marker was ever written... except this one now
+# was) read as "captured" and go silently unwarned. Written into its own
+# folder instead -- only the #1046 recovery guard
+# (_remember_recovery_prev_id_vouched, capture-gap-check.sh) accepts it as
+# evidence; capture_was_seen() deliberately does not.
+#
+# `[ -d ]` before the `mkdir` (#230, same convention as post-tool-hook.sh's
+# own capture-alive.d write): every session after the first in a store
+# finds this directory already there, and asking `mkdir -p` to confirm that
+# costs a process on every single SessionStart. The mkdir still runs -- and
+# still gates the write on its success -- the first time, and on any run
+# where the directory is missing.
 if [ -n "$REMEMBER_DIR" ] && [ -n "$CURRENT_SESSION_ID" ]; then
-    mkdir -p "$REMEMBER_DIR/tmp/capture-alive.d" 2>/dev/null
-    : > "$REMEMBER_DIR/tmp/capture-alive.d/$CURRENT_SESSION_ID" 2>/dev/null
+    if [ -d "$REMEMBER_DIR/tmp/session-started.d" ] \
+        || mkdir -p "$REMEMBER_DIR/tmp/session-started.d" 2>/dev/null; then
+        : > "$REMEMBER_DIR/tmp/session-started.d/$CURRENT_SESSION_ID" 2>/dev/null
+    fi
 fi
 
 # ── The transcript path the host handed us (#407) ─────────────────────────

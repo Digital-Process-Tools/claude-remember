@@ -217,6 +217,40 @@ def test_a_healthy_previous_session_is_not_accused_at_startup(tmp_path):
     )
 
 
+def test_the_session_started_marker_lands_in_its_own_folder_not_capture_alive_d(tmp_path):
+    """#1046 final review: the hook writes a cheap per-session roster marker
+    for its OWN (CURRENT) session id at every SessionStart (round 2 above),
+    so even a chat-only session earns one piece of recovery evidence. That
+    marker used to land in tmp/capture-alive.d -- the SAME folder
+    post-tool-hook.sh writes into, and the SAME folder capture_was_seen()
+    (the #200 capture-gap check's own evidence function) reads. A session
+    whose hooks never actually registered for PostToolUse would then still
+    get this marker from SessionStart alone, and capture_was_seen() could
+    not tell the two apart -- a real capture gap would read as "captured"
+    and the #200 warning would go quiet for it. Red before the fix: CURRENT
+    shows up in capture-alive.d. Green after it: CURRENT shows up only in
+    its own tmp/session-started.d, and capture-alive.d is untouched by this
+    run (nothing in this hook's own synchronous/deferred phases, run with
+    REMEMBER_DEFER=0, ever writes there -- only post-tool-hook.sh does)."""
+    home, project, remember, _ = _startup_project(tmp_path)
+
+    result = _run(_env(home, project, remember), _payload(CURRENT))
+    assert result.returncode == 0, subprocess_failure_detail(result, remember)
+
+    started = remember / "tmp" / "session-started.d" / CURRENT
+    assert started.exists(), (
+        "the session's own SessionStart marker was not written to "
+        f"tmp/session-started.d/{CURRENT}"
+    )
+    alive_marker = remember / "tmp" / "capture-alive.d" / CURRENT
+    assert not alive_marker.exists(), (
+        "the SessionStart marker landed in tmp/capture-alive.d -- the same "
+        "folder PostToolUse writes into and capture_was_seen() reads, "
+        "which silences the #200 check for a session whose hooks never "
+        "actually ran"
+    )
+
+
 def test_the_check_says_nothing_when_it_cannot_know_which_session_is_ours(tmp_path):
     """No stdin, so no session id, so "which of these is the previous one" has
     no answer — the positional guess is right at resume and wrong at startup

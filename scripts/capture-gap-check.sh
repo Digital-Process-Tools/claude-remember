@@ -843,6 +843,18 @@ _remember_recovery_prev_id_vouched() {
         return 1
     fi
     [ -e "$REMEMBER_DIR/tmp/capture-alive.d/$1" ] && return 0
+    # #1046 final review: a session that never ran a single tool call wrote
+    # NO marker into capture-alive.d (post-tool-hook.sh's own marker --
+    # that write is gated on PostToolUse firing at least once), but
+    # session-start-hook.sh now writes a cheaper marker of its own, into a
+    # SEPARATE folder, at the start of every session (including a
+    # chat-only one). Accepted here -- the recovery guard's own job is
+    # "does THIS store have any independent evidence at all for this id",
+    # and a session's own start is exactly that -- but deliberately not in
+    # capture_was_seen() below: that function backs the #200 capture-gap
+    # warning, where "session-started" would otherwise paper over hooks
+    # that genuinely never registered for a session that did nothing else.
+    [ -e "$REMEMBER_DIR/tmp/session-started.d/$1" ] && return 0
     [ -f "$REMEMBER_DIR/tmp/capture-alive" ] \
         && [ "$(<"$REMEMBER_DIR/tmp/capture-alive")" = "$1" ] && return 0
     return 1
@@ -865,6 +877,39 @@ _recovery_attempted=""
 # absence and must not report it as "never captured" when it may instead
 # belong to a different store.
 _prev_id_possibly_foreign_store=""
+# #1046 final review: one-time upgrade grace. A chat-only session (or any
+# session with no tool call) saved with NO roster evidence whatsoever may
+# simply predate this fix: the roster mechanism (#1046 round 2's own
+# capture-alive.d marker, and this branch's session-started.d one) only
+# exists from the moment a store starts running code that writes it, and a
+# previous session that ran entirely under an older plugin version earned
+# neither. Without this grace, the #1046 guard below treats that absence
+# exactly like "may belong to a different store" forever, permanently
+# declining to rescue a session that is, in fact, a genuine, rescuable gap
+# under THIS store -- the known trade-off changelog.d/1046.fixed.md
+# documents, closed for the upgrade-transition case specifically.
+#
+# tmp/roster-epoch marks the moment this store began producing that
+# evidence. Absent, or not older than the one previous transcript under
+# test here, means "this store may not have been collecting roster
+# evidence yet for that session" -- so recovery falls back to pre-#1046
+# behaviour (rescue) for this one decision, rather than silently and
+# permanently declining every session from before the upgrade.
+#
+# Created AFTER this decision (further below), never by
+# session-start-hook.sh, which writes ITS OWN per-session marker earlier
+# in this same run -- creating the epoch file any earlier would make this
+# very session's own grace decision see the epoch as already started.
+_remember_roster_epoch_grace=""
+ROSTER_EPOCH="$REMEMBER_DIR/tmp/roster-epoch"
+if [ -n "$REMEMBER_DIR" ]; then
+    if [ ! -f "$ROSTER_EPOCH" ]; then
+        _remember_roster_epoch_grace="true"
+    elif [ -n "$PREV_JSONL" ] && [ -f "$PREV_JSONL" ] \
+        && ! [ "$PREV_JSONL" -nt "$ROSTER_EPOCH" ]; then
+        _remember_roster_epoch_grace="true"
+    fi
+fi
 if [ "$_recovery_enabled" = "true" ]; then
 if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
     if [ "$PREV_WAS_SAVED" = "no" ]; then
@@ -893,7 +938,8 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
         # sources lib-memory-dir.sh (none shipped today, but nothing enforces
         # it) keeps the pre-#1046 behaviour rather than silently skipping
         # every recovery.
-        if [ -n "$REMEMBER_DIR" ] && ! _remember_recovery_prev_id_vouched "$PREV_ID"; then
+        if [ -n "$REMEMBER_DIR" ] && [ "$_remember_roster_epoch_grace" != "true" ] \
+            && ! _remember_recovery_prev_id_vouched "$PREV_ID"; then
             log "hook" "recovery: skipping force-save of $PREV_ID -- no capture-alive.d marker or legacy capture-alive slot under this REMEMBER_DIR (#1046: may belong to a different store sharing this project's transcript directory)"
             # #1046 round 2: the #200 capture-gap notice below reads the SAME
             # absence (no marker under this store) as "never captured" -- a
@@ -921,6 +967,15 @@ if [ -d "$SESSIONS_DIR" ] && [ -f "$LAST_SAVE_FILE" ] && [ -n "$PREV_ID" ]; then
         fi
     fi
 fi
+fi
+
+# Created AFTER the grace decision above has already been consulted (not
+# before, and never by session-start-hook.sh -- see that decision's own
+# comment): every run after the first one under this store sees the epoch
+# already started, so the grace applies at most once per previously-
+# ungraced previous session.
+if [ -n "$REMEMBER_DIR" ] && [ ! -f "$ROSTER_EPOCH" ]; then
+    : > "$ROSTER_EPOCH" 2>/dev/null || true
 fi
 
 # ── Capture-gap detection (#200) ──────────────────────────────────────────
@@ -983,6 +1038,11 @@ fi
 # the wording says so.
 CAPTURE_ALIVE="$REMEMBER_DIR/tmp/capture-alive"
 CAPTURE_SEEN_DIR="$REMEMBER_DIR/tmp/capture-alive.d"
+# #1046 final review: session-start-hook.sh's own per-session roster
+# marker (its own folder, kept separate from CAPTURE_SEEN_DIR above -- see
+# that write site's comment for why) is bounded the same way and by the
+# same constant, so it cannot grow without limit either.
+SESSION_STARTED_DIR="$REMEMBER_DIR/tmp/session-started.d"
 CAPTURE_REPORTED="$REMEMBER_DIR/tmp/capture-gap-reported"
 CAPTURE_SEEN_KEEP=200
 
@@ -1082,6 +1142,7 @@ _remember_prune_keep_newest() {
     return 0
 }
 _remember_prune_keep_newest "$CAPTURE_SEEN_DIR" "$CAPTURE_SEEN_KEEP"
+_remember_prune_keep_newest "$SESSION_STARTED_DIR" "$CAPTURE_SEEN_KEEP"
 
 # PREV_ID and PREV_JSONL were resolved once, above, for this check and for
 # recovery both. Guard against the honest zero-tool session too: a conversation

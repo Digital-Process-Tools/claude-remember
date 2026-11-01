@@ -29,6 +29,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -141,6 +142,72 @@ def test_a_1mb_transcript_sized_stdin_does_not_hang_the_real_hook(tmp_path):
         f"the read-loop's own quadratic accumulation is back if this scales "
         f"with payload size"
     )
+
+
+def test_hook_returns_quickly_when_a_writer_holds_stdin_open_past_the_cap(tmp_path):
+    """#1047 round 5 (final review): the bulk drain added after the read
+    loop's own cap trips (`cat <&0 >/dev/null`) used to run SYNCHRONOUSLY,
+    with no time bound of its own -- the per-line `read -t 1` loop above is
+    bounded, but that drain was not, so a host that writes an over-cap
+    payload and then holds its write end of stdin open (never sends EOF)
+    made the hook block for as long as the writer kept stdin open, however
+    long that is. Reproduced here with a real pipe: the feeder writes an
+    over-cap payload, then sleeps past this test's own patience window
+    before closing its write end -- a host that is merely slow to finish,
+    not one that never finishes at all. Red before the fix: the hook
+    returned only once the feeder closed its end, i.e. in lockstep with the
+    sleep. Green after it: the drain is backgrounded, so the hook returns
+    as soon as the read loop's own cap trips, long before the feeder closes
+    anything."""
+    home, project, remember = _store(tmp_path)
+    # Over the 32 KiB cap so the read loop's own truncation -- and therefore
+    # the drain this test targets -- actually fires.
+    payload = _transcript_shaped_payload(40000, lines=50).encode("utf-8")
+
+    read_fd, write_fd = os.pipe()
+    _feeder_done = threading.Event()
+
+    def _feed() -> None:
+        try:
+            os.write(write_fd, payload)
+            # Longer than this test's own elapsed-time assertion below, so a
+            # hook that (bug) waits for EOF cannot pass by accident -- it
+            # would have to wait out this whole sleep first.
+            time.sleep(6)
+        finally:
+            os.close(write_fd)
+            _feeder_done.set()
+
+    feeder = threading.Thread(target=_feed)
+    feeder.start()
+    try:
+        start = time.monotonic()
+        result = subprocess.run(
+            [BASH, str(SESSION_START)],
+            stdin=read_fd,
+            env=_env(home, project, remember),
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        os.close(read_fd)
+        feeder.join(timeout=10)
+
+    assert result.returncode == 0, (
+        f"hook exited {result.returncode}, stderr={result.stderr!r}"
+    )
+    # 3s: well under the feeder's 6s hold, and well over what the fixed,
+    # backgrounded drain actually costs (bounded by the read loop's own
+    # `read -t 1` cadence, not by the writer at all).
+    assert elapsed < 3.0, (
+        f"hook took {elapsed:.2f}s to return while a writer held stdin open "
+        f"for 6s past the cap -- the post-cap drain is blocking on the "
+        f"writer again instead of running detached"
+    )
+    assert _feeder_done.wait(timeout=10), "feeder thread never finished"
 
 
 def _extract_read_loop() -> str:

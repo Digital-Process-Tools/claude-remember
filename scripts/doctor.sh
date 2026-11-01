@@ -1132,11 +1132,11 @@ if [ "${#_RS_FILES[@]}" -gt 0 ]; then
     IFS="$_RS_OLD_IFS"
     unset _RS_OLD_IFS
     for _rs_f in "${_RS_SORTED[@]}"; do
-        _rs_count_file=$(grep -cE '\[(validate|haiku)\] REJECTED' "$_rs_f" 2>/dev/null)
+        _rs_count_file=$(grep -cE '\[(validate|haiku|summarizer)\] REJECTED' "$_rs_f" 2>/dev/null)
         [ -z "$_rs_count_file" ] && _rs_count_file=0
         [ "$_rs_count_file" -eq 0 ] && continue
         _RS_COUNT=$((_RS_COUNT + _rs_count_file))
-        _RS_LAST_LINE=$(grep -E '\[(validate|haiku)\] REJECTED' "$_rs_f" 2>/dev/null | tail -n 1)
+        _RS_LAST_LINE=$(grep -E '\[(validate|haiku|summarizer)\] REJECTED' "$_rs_f" 2>/dev/null | tail -n 1)
     done
     unset _RS_SORTED
 fi

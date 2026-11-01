@@ -432,6 +432,15 @@ def test_an_unsaved_previous_session_with_no_roster_marker_keeps_the_flat_wordin
     assert not (remember / "tmp" / "capture-alive.d" / "sess-prev").exists(), (
         "precondition: no roster marker for sess-prev under this store"
     )
+    # #1046 final review: past the one-time upgrade grace window (an epoch
+    # older than sess-prev's own transcript) -- this test is about the
+    # STEADY-STATE guard, not the upgrade transition pinned in
+    # tests/test_roster_skip_1046.py's own grace tests.
+    epoch = remember / "tmp" / "roster-epoch"
+    epoch.write_text("")
+    prev_jsonl = session_dir / "sess-prev.jsonl"
+    old_mtime = int(prev_jsonl.stat().st_mtime) - 3600
+    os.utime(epoch, (old_mtime, old_mtime))
 
     result = _run(SESSION_START, _env(home, project, remember))
     assert result.returncode == 0, subprocess_failure_detail(result, remember)
