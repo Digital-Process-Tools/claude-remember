@@ -1144,11 +1144,12 @@ CURRENT_LINES=$(( CURRENT_LINES + 0 ))
 # shortcut: same-path rewrites preserving the checkpoint newline need a full recount; upgrade when transcripts can be replaced.
 # Bind cached counts to the transcript path and publish the pair atomically.
 if [ -n "$SCAN_SIDECAR" ]; then
-    _SCAN_TEMP="$SCAN_SIDECAR.$$"
-    if ! printf '%s %s\n%s\n' "$_SCAN_NEW_OFFSET" "$CURRENT_LINES" "$TRANSCRIPT" > "$_SCAN_TEMP" 2>/dev/null \
-        || ! mv -f "$_SCAN_TEMP" "$SCAN_SIDECAR" 2>/dev/null; then
-        rm -f "$_SCAN_TEMP" 2>/dev/null || true
-    fi
+    _SCAN_TEMP=$(mktemp "${SCAN_SIDECAR}.XXXXXX" 2>/dev/null) && {
+        if ! printf '%s %s\n%s\n' "$_SCAN_NEW_OFFSET" "$CURRENT_LINES" "$TRANSCRIPT" > "$_SCAN_TEMP" 2>/dev/null \
+            || ! mv -f "$_SCAN_TEMP" "$SCAN_SIDECAR" 2>/dev/null; then
+            rm -f "$_SCAN_TEMP" 2>/dev/null || true
+        fi
+    }
 fi
 fi
 # CURRENT_LINES is 0 here when the scan above was skipped (IN_COOLDOWN=true)
