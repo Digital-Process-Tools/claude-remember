@@ -267,10 +267,10 @@ _remember_detach_windows() {
 # leg runs a non-English Windows locale to confirm it.
 _remember_detach_windows_wsh_disabled() {
     command -v reg.exe >/dev/null 2>&1 || return 1
-    local _wsh_key _wsh_val
-    for _wsh_key in 'HKLM\Software\Microsoft\Windows Script Host\Settings' \
-                    'HKCU\Software\Microsoft\Windows Script Host\Settings'; do
-        _wsh_val=$(MSYS2_ARG_CONV_EXCL='*' reg.exe query "$_wsh_key" /v Enabled 2>/dev/null \
+    local _wsh_path _wsh_val
+    for _wsh_path in 'HKLM\Software\Microsoft\Windows Script Host\Settings' \
+                      'HKCU\Software\Microsoft\Windows Script Host\Settings'; do
+        _wsh_val=$(MSYS2_ARG_CONV_EXCL='*' reg.exe query "$_wsh_path" /v Enabled 2>/dev/null \
             | tr -d '\r' | awk '/Enabled/ {print $NF}')
         [ "$_wsh_val" = "0x0" ] && return 0
     done
