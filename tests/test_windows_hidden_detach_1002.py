@@ -355,7 +355,13 @@ def test_detach_windows_wsh_disabled_skips_hidden_launcher_without_invoking_it(t
     captured = tmp_path / "captured.txt"
     _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
     _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
-    _stub(bindir / "reg.exe", 'echo "    Enabled    REG_DWORD    0x0"')
+    # reg.exe is a native Windows tool: its real output is CRLF, and
+    # lib-detach.sh's own probe explicitly strips the trailing \\r before
+    # awk looks for the value line (#1104 audit finding: a stub emitting
+    # bare \\n would never exercise that `tr -d '\\r'` stage at all, so a
+    # later regression there would stay green here). printf, not echo --
+    # echo's own \\r handling is not portable across shells.
+    _stub(bindir / "reg.exe", 'printf "    Enabled    REG_DWORD    0x0\\r\\n"')
     env = _controlled_env(path=f"{bindir}:/usr/bin:/bin", TMPDIR=str(tmp_path))
     out = tmp_path / "out.log"
     pid = tmp_path / "pid"

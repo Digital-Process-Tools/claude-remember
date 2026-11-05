@@ -258,6 +258,13 @@ _remember_detach_windows() {
 # turning "/v" into a path before reg.exe ever sees it. Output is
 # trimmed of trailing \r (reg.exe is a native Windows tool; its output
 # is CRLF) before awk looks for the "Enabled" value line.
+#
+# ASSUMED, not verified against a real non-English-locale Windows host
+# (#1104 audit): the registry value NAME ("Enabled") and reg.exe's own
+# type token ("REG_DWORD") and hex-formatted value ("0x0") are stored/
+# token strings, not resource-string-translated UI text, so this
+# should hold regardless of the host's display language -- but no CI
+# leg runs a non-English Windows locale to confirm it.
 _remember_detach_windows_wsh_disabled() {
     command -v reg.exe >/dev/null 2>&1 || return 1
     local _wsh_key _wsh_val
