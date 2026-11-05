@@ -81,3 +81,30 @@ def test_scan_cache_rename_failure_preserves_previous_entry(tmp_path):
     assert proc.stdout.strip() == "2"
     assert sidecar.read_text(encoding="utf-8") == old_entry
     assert list((memory / "tmp").iterdir()) == [sidecar]
+
+
+def test_scan_cache_missing_directory_still_counts(tmp_path):
+    source = (ROOT / "scripts" / "post-tool-hook.sh").read_text(encoding="utf-8")
+    start = source.index("_pt_scan_lines() {")
+    end = source.index("\nfi\n# CURRENT_LINES is 0 here", start)
+    script = tmp_path / "scan.sh"
+    script.write_text(
+        'set -eu\nTRANSCRIPT="$1"\nREMEMBER_DIR="$2"\n'
+        + source[start:end]
+        + '\nprintf "%s\\n" "$CURRENT_LINES"\n',
+        encoding="utf-8",
+    )
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    transcript = tmp_path / "same.jsonl"
+    transcript.write_bytes(b"one\ntwo\n")
+    bash = str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Git" / "bin" / "bash.exe") if os.name == "nt" else "bash"
+    proc = subprocess.run(
+        [bash, str(script), str(transcript), str(memory)],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=os.environ.copy(),
+    )
+    assert proc.stdout.strip() == "2"
+    assert list(memory.iterdir()) == []
