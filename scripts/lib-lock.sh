@@ -5,11 +5,17 @@
 # Why a directory and not a file:
 #
 #   `mkdir` either creates the directory or fails. One syscall, no check-then-
-#   act, no window. The previous `set -o noclobber` + `echo $$ >` acquisition
-#   had the right idea, but its *stale takeover* did not: `rm -f` (or a bare
-#   overwrite) followed by a create is two operations, and no amount of
-#   verification between or after them makes the pair atomic. Several processes
-#   could each observe the same dead PID and each declare itself the new holder.
+#   act, no window -- on every platform this held true against until #1108:
+#   Ubuntu 26.04's `mkdir` reported success for a directory that already
+#   existed, at rates up to 10/10 rounds of overlap. `_lock_acquire_impl`
+#   below does not take that return code as ownership on its own any more --
+#   see the noclobber guard at its primary `mkdir` call, the same pattern
+#   `_lock_try_adopt` already used for exactly this reason. The previous
+#   `set -o noclobber` + `echo $$ >` acquisition had the right idea, but its
+#   *stale takeover* did not: `rm -f` (or a bare overwrite) followed by a
+#   create is two operations, and no amount of verification between or after
+#   them makes the pair atomic. Several processes could each observe the same
+#   dead PID and each declare itself the new holder.
 #
 #   Measured on the old acquisition: 0/40 multi-winner rounds at N=2. At N=8 it
 #   is never zero — 11/40 in the harness on #182, 40/40 in the one that was in
