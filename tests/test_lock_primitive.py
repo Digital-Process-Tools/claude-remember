@@ -27,6 +27,7 @@ intervals, and a disjointness test that cannot resolve an overlap would be
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -710,6 +711,119 @@ def test_a_stranded_adopt_marker_does_not_wedge_the_lock_forever(tmp_path):
         f"{result.stdout} {result.stderr}"
     )
     assert (lock_dir / "pid").exists()
+
+
+# ---------------------------------------------------------------------------
+# #1108 -- Ubuntu 26.04 (ubuntu-latest) lost mutual exclusion at rates up to
+# 10/10 rounds on `test_no_two_holders_overlap`, never on ubuntu-24.04, macOS
+# or Windows in the same CI run (run 42110563194). Hypothesis: that image's
+# default coreutils (uutils, Rust) makes `mkdir` report success for a
+# directory that already existed -- not reproducible on any platform this
+# suite runs on without a shim, since the real `mkdir` everywhere else in
+# scope (GNU, BSD, the Windows bash shell) is a single exclusive syscall. The
+# shim below forces exactly that shape deterministically, on any platform,
+# the same way _stat_shim above forces the GNU/BSD split without needing
+# both OSes.
+# ---------------------------------------------------------------------------
+
+# `command mkdir` would NOT reach the real binary here: this shim's own
+# directory is first on PATH for the very subprocess that runs it, so a
+# fresh lookup from inside the shim finds the shim again -- unbounded
+# self-recursion until the OS fork limit kills it, with the real mkdir(1)
+# never once invoked (confirmed: 2108 nested invocations logged, directory
+# never created). Resolving the real binary's absolute path OUTSIDE the
+# PATH-overridden subprocess, once, and baking that path into the shim,
+# is what avoids it.
+_REAL_MKDIR = shutil.which("mkdir") or "/bin/mkdir"
+
+_NONEXCLUSIVE_MKDIR_SHIM = f"""#!/bin/sh
+# Simulates a `mkdir` that does not guarantee exclusivity: it calls the real
+# mkdir and always reports success regardless of the real outcome, mirroring
+# the symptom hypothesised for Ubuntu 26.04's uutils coreutils in #1108 -- a
+# caller that trusts this exit code alone cannot tell "I just created this"
+# from "this already existed".
+{_REAL_MKDIR} "$@" 2>/dev/null
+exit 0
+"""
+
+
+def _nonexclusive_mkdir_shim(tmp_path) -> Path:
+    """Install the fake `mkdir` above and return the bin dir to prepend to PATH."""
+    bindir = tmp_path / "bin-nonexclusive-mkdir"
+    bindir.mkdir()
+    shim = bindir / "mkdir"
+    shim.write_text(_NONEXCLUSIVE_MKDIR_SHIM, encoding="utf-8")
+    shim.chmod(0o755)
+    return bindir
+
+
+def test_mkdir_shim_harness_detects_a_real_double_entry(tmp_path):
+    """Positive control for the fix test below: proof the shim forces the
+    shape this file exists to test -- a mkdir that reports success against a
+    directory that already exists -- rather than merely failing to observe
+    anything. Sequential, not concurrent: nothing here depends on process
+    scheduling, because the shimmed mkdir lies about exclusivity
+    unconditionally, not only under a race.
+    """
+    bindir = _nonexclusive_mkdir_shim(tmp_path)
+    lock_dir = tmp_path / "trust-only.lock"
+    result = _run(f"""
+    PATH="{bindir}:$PATH"
+    mkdir "{lock_dir}" 2>/dev/null && echo FIRST_MKDIR_OK
+    mkdir "{lock_dir}" 2>/dev/null && echo SECOND_MKDIR_OK
+    """)
+    assert result.returncode == 0, result.stderr
+    assert "FIRST_MKDIR_OK" in result.stdout, (
+        f"the shim refused even the first, genuine mkdir: {result.stdout} "
+        f"{result.stderr}"
+    )
+    assert "SECOND_MKDIR_OK" in result.stdout, (
+        "the shim did not report success for a second mkdir against the "
+        "SAME already-existing directory, so this shim is not forcing the "
+        f"shape this file exists to test: {result.stdout} {result.stderr}"
+    )
+
+
+def test_mkdir_success_alone_is_not_trusted_1108(tmp_path):
+    """#1108: a mkdir that reports success for a directory that already
+    exists -- the Ubuntu 26.04 shape -- must not cost mutual exclusion.
+    lock_acquire has to confirm it actually won with a second, bash-native
+    guard, exactly as _lock_try_adopt already does for the adoption path
+    (the noclobber comment above it). That guard is an O_EXCL-style
+    open(2) done by bash's own redirection, not an external binary, so it
+    does not depend on mkdir -- or any other coreutils command -- being
+    exclusive on the host.
+
+    Sequential, not concurrent, and deliberately so: the first lock_acquire
+    genuinely creates the directory and never releases it, so the second
+    call's mkdir reports success against a lock that is provably still
+    held -- a shape that can never be a valid second acquisition, with no
+    scheduler race needed to produce it.
+    """
+    bindir = _nonexclusive_mkdir_shim(tmp_path)
+    lock_dir = tmp_path / "shimmed.lock"
+    result = _run(f"""
+    PATH="{bindir}:$PATH"
+    source {LIB_LOCK_SH}
+    lock_acquire "{lock_dir}" 0 && echo FIRST_ACQUIRED
+    lock_acquire "{lock_dir}" 0 && echo SECOND_ACQUIRED || echo SECOND_REFUSED
+    """)
+    assert result.returncode == 0, result.stderr
+    assert "FIRST_ACQUIRED" in result.stdout, (
+        f"the first, genuine acquisition did not succeed: {result.stdout} "
+        f"{result.stderr}"
+    )
+    assert "SECOND_ACQUIRED" not in result.stdout, (
+        f"a second lock_acquire succeeded while the first call's own "
+        f"process still held the lock, purely because the shimmed mkdir "
+        f"reported success for an already-existing directory (the Ubuntu "
+        f"26.04 shape hypothesised in #1108): {result.stdout} {result.stderr}"
+    )
+    assert "SECOND_REFUSED" in result.stdout, (
+        f"the second call neither acquired nor refused -- it did not run "
+        f"the branch this test exists to check at all: {result.stdout} "
+        f"{result.stderr}"
+    )
 
 
 def test_a_fresh_adopt_marker_is_left_alone(tmp_path):

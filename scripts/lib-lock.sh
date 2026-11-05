@@ -639,8 +639,25 @@ _lock_acquire_impl() {
     while :; do
         if mkdir "$_dir" 2>/dev/null; then
             _lock_self_set
-            echo "$_LOCK_SELF" > "${_dir}/pid" 2>/dev/null || true
-            return 0
+            # `mkdir`'s exit code was this file's whole exclusivity argument
+            # (see the header) and on every platform tested before #1108
+            # that held: one syscall, no window. Measured false on Ubuntu
+            # 26.04 (#1108): `mkdir` reporting success for a directory that
+            # already existed, at rates up to 10/10 rounds -- every
+            # contender believed it alone had just created the directory.
+            # `noclobber` is the same O_EXCL-style guard `_lock_try_adopt`
+            # already uses below, for exactly this reason: it is bash's own
+            # open(2) flag, done by the shell itself, not an external
+            # binary, so it does not depend on `mkdir` -- or any other
+            # coreutils command -- being exclusive on the host.
+            if ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null; then
+                return 0
+            fi
+            # Lost the pid race even though our own `mkdir` reported
+            # success too -- `mkdir` was not exclusive here. The real
+            # winner's pid is already in place; fall through to the same
+            # steal/adopt/wait path any other contender takes instead of
+            # returning 0 for a directory we do not actually hold alone.
         fi
 
         if { [ -e "$_dir" ] || [ -L "$_dir" ]; } && [ ! -d "$_dir" ]; then
