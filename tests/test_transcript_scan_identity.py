@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 import subprocess
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -142,7 +144,8 @@ def test_scan_cache_temp_creation_failure_preserves_previous_entry(tmp_path):
     assert list((memory / "tmp").iterdir()) == [sidecar]
 
 
-def test_scan_cache_preserves_path_with_spaces(tmp_path):
+@pytest.mark.parametrize("directory", ["directory with spaces", "unicode-\u03bb"])
+def test_scan_cache_preserves_transcript_path(tmp_path, directory):
     source = (ROOT / "scripts" / "post-tool-hook.sh").read_text(encoding="utf-8")
     start = source.index("_pt_scan_lines() {")
     end = source.index("\nfi\n# CURRENT_LINES is 0 here", start)
@@ -155,7 +158,7 @@ def test_scan_cache_preserves_path_with_spaces(tmp_path):
     )
     memory = tmp_path / "memory"
     (memory / "tmp").mkdir(parents=True)
-    transcript = tmp_path / "directory with spaces" / "same.jsonl"
+    transcript = tmp_path / directory / "same.jsonl"
     transcript.parent.mkdir()
     transcript.write_bytes(b"one\ntwo\n")
     sidecar = memory / "tmp" / "transcript-scan.same"
