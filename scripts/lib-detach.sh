@@ -232,6 +232,44 @@ _remember_detach_windows() {
     return "$_rc"
 }
 
+# _remember_detach_windows_wsh_disabled: true when Windows Script Host
+# itself has been disabled by machine or user policy (HKLM/HKCU
+# \Software\Microsoft\Windows Script Host\Settings -> Enabled=0, a
+# common hardening setting -- #1104). wscript.exe does NOT fail silently
+# in that case: it raises a MODAL dialog ("Windows Script Host access is
+# disabled on this machine...") that stays on screen until clicked or
+# this file's own watchdog kills it, recurring every 5-60 minutes
+# depending on which verdict the cache below ends up publishing. Probing
+# the policy first, before ever invoking wscript.exe, avoids the dialog
+# outright rather than merely bounding how often it reappears.
+#
+# reg.exe missing (conceivable on a minimal Git Bash install) is treated
+# as "can't tell" -- return 1 (not disabled) immediately and let the
+# existing checks decide, same as before this function existed; this is
+# a strictly additive probe, never a new way to block the hidden route.
+#
+# HKLM is checked before HKCU: a machine-wide policy value is the one a
+# host's administrator set, and it overrides a per-user value the same
+# way Windows Group Policy generally treats machine scope as
+# authoritative over user scope. Either hive reporting Enabled=0x0 is
+# enough to skip the hidden route.
+#
+# MSYS2_ARG_CONV_EXCL='*' stops Git Bash's own argv-rewriting from
+# turning "/v" into a path before reg.exe ever sees it. Output is
+# trimmed of trailing \r (reg.exe is a native Windows tool; its output
+# is CRLF) before awk looks for the "Enabled" value line.
+_remember_detach_windows_wsh_disabled() {
+    command -v reg.exe >/dev/null 2>&1 || return 1
+    local _wsh_key _wsh_val
+    for _wsh_key in 'HKLM\Software\Microsoft\Windows Script Host\Settings' \
+                    'HKCU\Software\Microsoft\Windows Script Host\Settings'; do
+        _wsh_val=$(MSYS2_ARG_CONV_EXCL='*' reg.exe query "$_wsh_key" /v Enabled 2>/dev/null \
+            | tr -d '\r' | awk '/Enabled/ {print $NF}')
+        [ "$_wsh_val" = "0x0" ] && return 0
+    done
+    return 1
+}
+
 _remember_detach_windows_impl() {
     local outfile pidfile
     outfile="$1"
@@ -249,6 +287,7 @@ _remember_detach_windows_impl() {
     [ -f "$pidwrap" ] || return 1
     command -v wscript.exe >/dev/null 2>&1 || return 1
     command -v cygpath >/dev/null 2>&1 || return 1
+    _remember_detach_windows_wsh_disabled && return 1
 
     local vbs_win
     vbs_win="$(cygpath -w "$vbs" 2>/dev/null)" || return 1

@@ -341,6 +341,87 @@ def test_detach_windows_invokes_hidden_launcher_with_expected_args(tmp_path):
 
 
 @_NO_BASH
+def test_detach_windows_wsh_disabled_skips_hidden_launcher_without_invoking_it(tmp_path):
+    """#1104: when Windows Script Host itself is disabled by policy,
+    wscript.exe does not fail silently -- it raises a MODAL dialog that
+    stays on screen until clicked or this file's own watchdog kills it.
+    A reg.exe stub reporting Enabled=0x0 (the registry shape #1104's own
+    reporter observed under HKLM policy) must make
+    _remember_detach_windows skip the hidden route WITHOUT ever invoking
+    wscript.exe -- the whole point is to never risk the dialog, not just
+    to recover quickly after it appears."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    captured = tmp_path / "captured.txt"
+    _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    _stub(bindir / "reg.exe", 'echo "    Enabled    REG_DWORD    0x0"')
+    env = _controlled_env(path=f"{bindir}:/usr/bin:/bin", TMPDIR=str(tmp_path))
+    out = tmp_path / "out.log"
+    pid = tmp_path / "pid"
+    r = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"',
+        env,
+    )
+    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert not captured.exists(), (
+        "wscript.exe was invoked despite WSH being reported disabled -- "
+        "the modal dialog this check exists to avoid would have fired"
+    )
+    cache_file = tmp_path / "remember-detach-windows-cache"
+    assert cache_file.exists(), "a WSH-disabled skip must still publish the verdict cache"
+    assert "VERDICT=unusable" in cache_file.read_text(encoding="utf-8")
+
+
+@_NO_BASH
+def test_detach_windows_wsh_enabled_still_uses_hidden_launcher(tmp_path):
+    """Positive control for the test above: a reg.exe stub reporting
+    Enabled=0x1 (WSH NOT disabled) must NOT be treated as a reason to
+    skip the hidden route -- otherwise the test above would also pass on
+    a harness that always skips, regardless of what reg.exe actually
+    reports."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    captured = tmp_path / "captured.txt"
+    _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    _stub(bindir / "reg.exe", 'echo "    Enabled    REG_DWORD    0x1"')
+    env = _controlled_env(path=f"{bindir}:/usr/bin:/bin", TMPDIR=str(tmp_path))
+    out = tmp_path / "out.log"
+    pid = tmp_path / "pid"
+    r = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"; sleep 0.2',
+        env,
+    )
+    assert "RC=0" in r.stdout, r.stdout + r.stderr
+    assert captured.exists(), "the hidden route never ran despite WSH being reported enabled"
+
+
+@_NO_BASH
+def test_detach_windows_reg_exe_missing_is_unaffected(tmp_path):
+    """reg.exe absent entirely (a minimal Git Bash install, or any
+    non-Windows CI host) must be treated as "can't tell", never as a new
+    reason to skip the hidden route -- this probe is strictly additive.
+    PATH here deliberately excludes any real reg.exe (which on a real
+    Windows host lives in System32, not on this replaced PATH), proving
+    the absence case rather than merely outranking a real binary."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    captured = tmp_path / "captured.txt"
+    _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    env = _controlled_env(path=f"{bindir}:/usr/bin:/bin", TMPDIR=str(tmp_path))
+    out = tmp_path / "out.log"
+    pid = tmp_path / "pid"
+    r = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"; sleep 0.2',
+        env,
+    )
+    assert "RC=0" in r.stdout, r.stdout + r.stderr
+    assert captured.exists(), "a missing reg.exe must not block the hidden route"
+
+
+@_NO_BASH
 def test_detach_windows_resolves_bare_bash_argv_to_absolute_path(tmp_path):
     """#1002 review: session-end-hook.sh and agy-stop-hook.sh both hand
     _remember_detach_windows a bare "bash" as the real command's own
