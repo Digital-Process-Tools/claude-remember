@@ -543,16 +543,24 @@ def test_a_live_holder_within_the_hold_bound_is_not_stolen_from(tmp_path):
         holder.wait(timeout=10)
 
 
-def test_an_unreadable_pid_file_past_the_adopt_age_is_reclaimed_without_hanging(
+def test_an_unreadable_pid_file_is_refused_quickly_rather_than_hanging(
     tmp_path,
 ):
     """#1103: a dataless cloud-sync placeholder pid file blocks a plain `cat`
     on the read syscall rather than returning content or an error (observed
     at ~60s). Simulated here with a FIFO that has no writer, which blocks a
     `cat` exactly the same way without depending on an actual sync client.
-    Once the lock directory is old enough, the bounded read must give up and
-    the lock must still be reclaimable -- and the whole call must return
-    well inside this test's own subprocess timeout, not hang."""
+
+    A timed-out read must NEVER be treated as grounds to steal the lock, no
+    matter how old the lock directory is -- found in this fix's own
+    self-review: a single timeout cannot tell a permanently stuck
+    placeholder from a live holder's pid file that is merely slow to read
+    once, and reclaiming on that guess let two processes believe they held
+    the same lock whenever both the first read and the post-rename re-check
+    happened to time out the same way. The fix this test pins is narrower
+    than a first cut attempted: REFUSED, quickly, every time -- never
+    ACQUIRED -- and the whole call must return well inside this test's own
+    subprocess timeout, proving the read did not hang either."""
     lock_dir = tmp_path / "dataless.lock"
     lock_dir.mkdir()
     os.mkfifo(lock_dir / "pid")
@@ -568,18 +576,73 @@ def test_an_unreadable_pid_file_past_the_adopt_age_is_reclaimed_without_hanging(
         """,
         timeout=20,
     )
-    assert "ACQUIRED" in result.stdout, (
-        f"an unreadable pid file older than _LOCK_ADOPT_AFTER must be "
-        f"reclaimable without blocking: {result.stdout!r} {result.stderr!r}"
+    assert "REFUSED" in result.stdout, (
+        f"an unreadable pid file must never be reclaimed, however old the "
+        f"lock directory is -- a timeout is not proof the holder is dead: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert (lock_dir / "pid").exists(), (
+        "a refused steal must leave the original pid file in place"
     )
 
 
-def test_an_unreadable_pid_file_within_the_adopt_age_is_not_reclaimed(tmp_path):
-    """Positive control for the test above: the same unreadable (FIFO) pid
-    file, but too young to be debris, must still refuse -- otherwise every
-    unreadable pid would be reclaimed regardless of age, which is exactly
-    the holder-mid-acquisition case this guards against."""
-    lock_dir = tmp_path / "dataless-fresh.lock"
+def test_a_live_holder_is_never_stolen_from_even_when_its_pid_read_times_out(
+    tmp_path,
+):
+    """The double-timeout hazard from self-review, pinned directly: a REAL
+    live holder whose pid file happens to be slow to read (not permanently
+    stuck -- simulated with a fake, slow `cat` on PATH) must still be
+    refused, even though both the initial read and the post-rename
+    re-read of the renamed claim file would time out identically. A first
+    cut treated two timeouts as "confirmed unchanged" and stole the lock
+    out from under a holder that was alive and healthy the whole time."""
+    lock_dir = tmp_path / "slow-live.lock"
+    lock_dir.mkdir()
+    holder = subprocess.Popen(["sleep", "10"])
+    bin_dir = tmp_path / "slowbin"
+    bin_dir.mkdir()
+    slow_cat = bin_dir / "cat"
+    slow_cat.write_text(
+        "#!/bin/sh\nsleep 30\nexec /bin/cat \"$@\"\n", encoding="utf-8"
+    )
+    slow_cat.chmod(0o755)
+    try:
+        (lock_dir / "pid").write_text(str(holder.pid), encoding="utf-8")
+        old_time = time.time() - 120
+        os.utime(lock_dir, (old_time, old_time))
+
+        result = _run(
+            f"""
+            PATH="{bin_dir}:$PATH"
+            source {LIB_LOCK_SH}
+            _LOCK_PID_READ_TIMEOUT=1
+            _LOCK_ADOPT_AFTER=5
+            lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+            """,
+            timeout=20,
+        )
+        assert "REFUSED" in result.stdout, (
+            f"a live holder must never be stolen from merely because its "
+            f"pid read was slow: {result.stdout!r} {result.stderr!r}"
+        )
+        assert (lock_dir / "pid").read_text(encoding="utf-8").strip() == str(
+            holder.pid
+        ), "the original holder's pid must be left exactly as it was"
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_release_refuses_rather_than_removes_on_a_timed_out_pid_read(tmp_path):
+    """Self-review finding: a release whose OWN pid read times out must
+    refuse (as it already does on a genuine ownership mismatch), never fall
+    through to removing a directory it could not confirm was its own. A
+    first cut treated the timeout the same as a legitimately empty pid
+    file, which skips the ownership check entirely and deletes
+    unconditionally -- reachable through this library's own documented
+    `trap 'lock_release "$LOCK_DIR"' EXIT` pattern by any process whose own
+    acquire never even succeeded."""
+    lock_dir = tmp_path / "other-slow.lock"
     lock_dir.mkdir()
     os.mkfifo(lock_dir / "pid")
 
@@ -587,14 +650,16 @@ def test_an_unreadable_pid_file_within_the_adopt_age_is_not_reclaimed(tmp_path):
         f"""
         source {LIB_LOCK_SH}
         _LOCK_PID_READ_TIMEOUT=1
-        _LOCK_ADOPT_AFTER=3600
-        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        lock_release "{lock_dir}" && echo RELEASED || echo REFUSED
         """,
         timeout=20,
     )
     assert "REFUSED" in result.stdout, (
-        f"an unreadable pid file younger than _LOCK_ADOPT_AFTER must not be "
-        f"reclaimed: {result.stdout!r} {result.stderr!r}"
+        f"a release that cannot confirm ownership within the timeout must "
+        f"refuse, not remove the lock: {result.stdout!r} {result.stderr!r}"
+    )
+    assert lock_dir.exists(), (
+        "a refused release must leave the lock directory in place"
     )
 
 

@@ -82,9 +82,14 @@
 #     was deleted after the placeholder synced) blocks a plain `cat` on the
 #     read syscall rather than returning content or an error.
 #     `_lock_read_pid_timeout` bounds that read so it cannot consume a
-#     whole hook's own timeout budget, and an unreadable-or-still-empty pid
-#     past `_LOCK_ADOPT_AFTER` is treated exactly like the already-existing
-#     no-pid-file-at-all case: debris, not a live holder (#1103).
+#     whole hook's own timeout budget. A read that does not complete in time
+#     is treated as "still held, try again later" -- NEVER as grounds to
+#     reclaim: a single timeout cannot tell a permanently stuck placeholder
+#     from a live holder's pid file that is merely slow to read once, and
+#     guessing wrong there would let an unrelated process steal or delete a
+#     lock a healthy holder still owns (#1103, found in this fix's own
+#     self-review). The fast timeout alone is still strictly better than the
+#     unbounded `cat` it replaces.
 
 [ -n "${_REMEMBER_LIB_LOCK_SOURCED:-}" ] && return 0
 _REMEMBER_LIB_LOCK_SOURCED=1
@@ -167,11 +172,13 @@ _lock_read_pid_timeout() {
     local _file="$1" _tmp _cat_pid _deadline
     _LOCK_PID_READ_RESULT=""
     _tmp=$(mktemp "${TMPDIR:-/tmp}/remember-pidread-XXXXXX" 2>/dev/null) || {
-        # No scratch file to redirect into -- fall back to a direct,
-        # unbounded read rather than silently reporting every pid as
-        # unreadable when the only thing that failed was `mktemp`.
-        _LOCK_PID_READ_RESULT=$(cat "$_file" 2>/dev/null) || true
-        return 0
+        # No scratch file to redirect into. Falling back to a direct,
+        # UNBOUNDED read here would silently reinstate the exact hazard this
+        # function exists to bound (#1103) -- and `mktemp` failing is itself
+        # correlated with the degraded storage #1103 is about, so this is not
+        # a rare corner. Report unreadable instead; callers already treat
+        # that as "try again later", never as licence to reclaim.
+        return 1
     }
     ( cat "$_file" > "$_tmp" 2>/dev/null ) &
     _cat_pid=$!
@@ -231,22 +238,25 @@ _lock_try_steal() {
     else
         # Did not complete within _LOCK_PID_READ_TIMEOUT -- a dataless
         # cloud-sync placeholder blocks the read rather than returning
-        # content (#1103). Treated identically to a genuinely empty read
-        # below: age, not content, is what tells a holder mid-acquisition
-        # from permanent debris.
-        _pid=""
+        # content (#1103), but a read that is merely slow ONCE looks
+        # identical from here, and a live, healthy holder's pid file can be
+        # slow to read for reasons that have nothing to do with how long the
+        # lock itself has been held. Guessing "debris" from a single timeout
+        # risks stealing a lock out from under a holder that is making
+        # normal progress -- found in self-review (#1101/#1103): treating
+        # this the same as a genuinely-empty-and-old pid let two processes
+        # both believe they held the same lock whenever BOTH this read and
+        # the post-rename re-check below happened to time out the same way.
+        # Refuse and let the caller retry rather than steal on a guess; the
+        # fast timeout alone is still strictly better than the unbounded
+        # `cat` this replaces, which could block an entire hook's budget.
+        return 1
     fi
 
-    # Empty or non-numeric: either a holder mid-acquisition (pid not written
-    # yet, microseconds old -- the original reason for this check) or a pid
-    # file that cannot be read at all, including the timeout case above. Age
-    # is what tells those apart: anything this young is an acquisition in
-    # flight; anything this old, with no pid ever readable, is the same
-    # permanent debris _lock_try_adopt already reclaims for the no-pid-file
-    # case below -- reused here rather than duplicated (#1103).
-    if [ -z "$_pid" ] || [[ "$_pid" == *[!0-9]* ]]; then
-        [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_ADOPT_AFTER" ] || return 1
-        _pid=""
+    # No pid file yet: the holder created the directory microseconds ago and
+    # has not written it. That is a live lock mid-acquisition, not a stale
+    # one.
+    [ -n "$_pid" ] && [[ "$_pid" != *[!0-9]* ]] || return 1
     # Alive is not the same as healthy: a holder that hangs forever --
     # blocked on I/O, a wedged pipe -- is live by `kill -0` indefinitely
     # (#1101). Bound how long ANY live holder may keep the lock before a
@@ -254,7 +264,7 @@ _lock_try_steal() {
     # is created and again, microseconds later, when the pid is written, so
     # its age already tracks the lock's own hold duration -- no separate
     # timestamp file, no extra cost on the common acquire path.
-    elif kill -0 "$_pid" 2>/dev/null; then
+    if kill -0 "$_pid" 2>/dev/null; then
         [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_MAX_HOLD_SECONDS" ] || return 1
     fi
 
@@ -271,11 +281,15 @@ _lock_try_steal() {
     # closes that window because the path is never empty.
     mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
 
-    if _lock_read_pid_timeout "$_claim"; then
-        _seen="$_LOCK_PID_READ_RESULT"
-    else
-        _seen=""
+    # A timed-out re-read here must restore and refuse, exactly like a
+    # mismatch below -- never fall through as though it had matched. Letting
+    # "could not confirm" and "confirmed identical" collapse into the same
+    # branch is precisely the self-review finding above, one line later.
+    if ! _lock_read_pid_timeout "$_claim"; then
+        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        return 1
     fi
+    _seen="$_LOCK_PID_READ_RESULT"
     if [ "$_seen" != "$_pid" ]; then
         mv "$_claim" "${_dir}/pid" 2>/dev/null || true
         return 1
@@ -822,10 +836,14 @@ _lock_release_impl() {
     else
         # Same dataless-placeholder hazard as the read in _lock_try_steal
         # (#1103) -- bounded rather than left to block the release path too.
-        # An unreadable pid already fell through to the removal below before
-        # this change (empty `_pid` skips the ownership check); the only
-        # thing this adds is bounding how long that fallback takes to reach.
-        _pid=""
+        # UNLIKE _lock_try_steal, this function's caller believes IT holds
+        # the lock: an inconclusive read must never fall through to removing
+        # a directory that might belong to someone else. A first cut here
+        # treated a timeout the same as a genuinely empty pid (which skips
+        # the ownership check below and removes unconditionally) -- found in
+        # self-review to let a process whose own read was merely slow once
+        # delete a live, unrelated holder's lock. Refuse rather than guess.
+        return 1
     fi
 
     _lock_self_set
