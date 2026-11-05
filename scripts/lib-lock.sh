@@ -43,7 +43,7 @@
 #
 # Functions:
 #   lock_acquire <lock_dir> [timeout_seconds]  -> 0 acquired, 1 timed out
-#   lock_release <lock_dir>                    -> 0 released, 1 not ours
+#   lock_release <lock_dir>                    -> 0 released, 1 not ours (or ownership could not be confirmed in time)
 #
 # CROSS-HOST CONTRACT (Claude Code and Codex sharing one .remember/ store on
 # one machine, #491): this primitive is safe there, deliberately, because it
@@ -172,13 +172,22 @@ _lock_read_pid_timeout() {
     local _file="$1" _tmp _cat_pid _deadline
     _LOCK_PID_READ_RESULT=""
     _tmp=$(mktemp "${TMPDIR:-/tmp}/remember-pidread-XXXXXX" 2>/dev/null) || {
-        # No scratch file to redirect into. Falling back to a direct,
-        # UNBOUNDED read here would silently reinstate the exact hazard this
-        # function exists to bound (#1103) -- and `mktemp` failing is itself
-        # correlated with the degraded storage #1103 is about, so this is not
-        # a rare corner. Report unreadable instead; callers already treat
-        # that as "try again later", never as licence to reclaim.
-        return 1
+        # No scratch file to redirect into, so there is nowhere to background
+        # the read INTO -- this function's own timeout mechanism cannot help
+        # here regardless of what this branch does. A second-review finding
+        # corrected an earlier instinct to `return 1` unconditionally on this
+        # branch: `mktemp` fails for ordinary reasons that have nothing to do
+        # with #1103's cloud-sync placeholders -- a full or unwritable
+        # TMPDIR, no free inodes -- and refusing unconditionally here made
+        # EVERY caller of _lock_try_steal and _lock_release_impl refuse
+        # unconditionally too, including a release of a lock the process
+        # legitimately owns. That is a total, systemic lock outage, strictly
+        # worse than the narrow, rare hang this whole fix exists to bound.
+        # Falling back to a direct, unbounded `cat` degrades this one corner
+        # to exactly the behaviour every caller already had before #1103 --
+        # not worse, and bounded everywhere `mktemp` still works.
+        _LOCK_PID_READ_RESULT=$(cat "$_file" 2>/dev/null) || true
+        return 0
     }
     ( cat "$_file" > "$_tmp" 2>/dev/null ) &
     _cat_pid=$!
@@ -253,10 +262,22 @@ _lock_try_steal() {
         return 1
     fi
 
-    # No pid file yet: the holder created the directory microseconds ago and
-    # has not written it. That is a live lock mid-acquisition, not a stale
-    # one.
-    [ -n "$_pid" ] && [[ "$_pid" != *[!0-9]* ]] || return 1
+    # Confirmed empty or non-numeric -- the read genuinely completed, so this
+    # is a fact rather than a guess, unlike the timeout case above. Two
+    # different things can cause it: the holder created the directory
+    # microseconds ago and has not written its pid yet (a live acquisition
+    # in flight), or the holder died between `mkdir` and writing its pid,
+    # leaving a pid file that exists and is empty forever (a second-review
+    # finding: `_lock_try_adopt` below only ever reclaims a MISSING pid
+    # file -- its very first line is `[ -e "${_dir}/pid" ] && return 1` --
+    # so a pid file that exists-but-is-empty has no other reclaim path at
+    # all). Age is what tells the two apart, same as the no-pid-file case
+    # `_lock_try_adopt` already covers; because the content was genuinely
+    # read, age-gating it here carries none of the ambiguity a timeout
+    # would.
+    if [ -z "$_pid" ] || [[ "$_pid" == *[!0-9]* ]]; then
+        [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_ADOPT_AFTER" ] || return 1
+        _pid=""
     # Alive is not the same as healthy: a holder that hangs forever --
     # blocked on I/O, a wedged pipe -- is live by `kill -0` indefinitely
     # (#1101). Bound how long ANY live holder may keep the lock before a
@@ -264,7 +285,7 @@ _lock_try_steal() {
     # is created and again, microseconds later, when the pid is written, so
     # its age already tracks the lock's own hold duration -- no separate
     # timestamp file, no extra cost on the common acquire path.
-    if kill -0 "$_pid" 2>/dev/null; then
+    elif kill -0 "$_pid" 2>/dev/null; then
         [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_MAX_HOLD_SECONDS" ] || return 1
     fi
 

@@ -633,6 +633,83 @@ def test_a_live_holder_is_never_stolen_from_even_when_its_pid_read_times_out(
         holder.wait(timeout=10)
 
 
+def test_a_confirmed_empty_and_old_pid_file_is_still_reclaimed(tmp_path):
+    """Second-review finding: an earlier cut of the timeout-refusal fix
+    collapsed the confirmed-empty-pid branch and the timed-out-read branch
+    into one unconditional refusal, which also removed the ONLY path that
+    ever reclaims a pid file that exists and is empty forever (a holder
+    killed between `mkdir` and writing its pid) -- `_lock_try_adopt`
+    explicitly refuses whenever the pid file exists at all, timed out or
+    not. A confirmed-by-a-completed-read empty pid is a fact, not a guess
+    like a timeout is, so it must still be reclaimable once old enough."""
+    lock_dir = tmp_path / "confirmed-empty.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("", encoding="utf-8")
+    old_time = time.time() - 120
+    os.utime(lock_dir, (old_time, old_time))
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _LOCK_ADOPT_AFTER=5
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+    """)
+    assert "ACQUIRED" in result.stdout, (
+        f"a confirmed-empty, old pid file must still be reclaimable: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+
+
+def test_a_confirmed_empty_but_fresh_pid_file_is_not_reclaimed(tmp_path):
+    """Positive control for the test above: the same confirmed-empty pid
+    file, but too young to be debris, must still refuse -- the original
+    holder-mid-acquisition protection this age gate exists for."""
+    lock_dir = tmp_path / "confirmed-empty-fresh.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("", encoding="utf-8")
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _LOCK_ADOPT_AFTER=3600
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+    """)
+    assert "REFUSED" in result.stdout, (
+        f"a fresh, confirmed-empty pid file must not be reclaimed: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+
+
+def test_release_of_an_owned_lock_still_works_when_mktemp_is_unusable(
+    tmp_path,
+):
+    """Second-review finding: an earlier cut of _lock_read_pid_timeout's
+    mktemp-failure fallback refused unconditionally instead of degrading to
+    a direct read, which meant an unwritable/full TMPDIR -- an ordinary
+    operational problem with nothing to do with #1103's cloud-sync
+    placeholders -- made EVERY lock release and steal refuse, including a
+    release of a lock the releasing process legitimately owns. That is a
+    total lock outage strictly worse than the narrow hang this fix exists
+    to bound, and this test pins that releasing your own lock still works
+    when TMPDIR cannot be used for scratch space."""
+    lock_dir = tmp_path / "mktemp-unusable.lock"
+    unusable_tmpdir = tmp_path / "no-mktemp-here"
+    unusable_tmpdir.mkdir(mode=0o000)
+    try:
+        result = _run(
+            f"""
+            export TMPDIR="{unusable_tmpdir}"
+            source {LIB_LOCK_SH}
+            lock_acquire "{lock_dir}" 0 || {{ echo ACQUIRE_FAILED; exit 0; }}
+            lock_release "{lock_dir}" && echo RELEASED || echo REFUSED
+            """
+        )
+        assert "RELEASED" in result.stdout, (
+            f"releasing an owned lock must not fail just because TMPDIR is "
+            f"unusable: {result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        unusable_tmpdir.chmod(0o755)
+
+
 def test_release_refuses_rather_than_removes_on_a_timed_out_pid_read(tmp_path):
     """Self-review finding: a release whose OWN pid read times out must
     refuse (as it already does on a genuine ownership mismatch), never fall
