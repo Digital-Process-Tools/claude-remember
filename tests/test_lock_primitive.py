@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -485,6 +486,115 @@ def test_a_fresh_pidless_lock_is_not_adopted(tmp_path):
     """)
     assert "REFUSED" in result.stdout, (
         f"adopted a lock a holder had just created: {result.stdout} {result.stderr}"
+    )
+
+
+def test_a_live_but_permanently_hung_holder_is_eventually_stolen_from(tmp_path):
+    """#1101: a holder that is alive but makes no progress at all (blocked
+    on I/O, a wedged pipe) is live by `kill -0` for as long as it blocks --
+    observed on #1101 as over two days. Once the lock directory's own age
+    exceeds _LOCK_MAX_HOLD_SECONDS, a later acquirer must be able to take it
+    over anyway, regardless of liveness."""
+    lock_dir = tmp_path / "hung.lock"
+    lock_dir.mkdir()
+    holder = subprocess.Popen(["sleep", "30"])
+    try:
+        (lock_dir / "pid").write_text(str(holder.pid), encoding="utf-8")
+        # Back-date the directory so it reads as held well past the bound,
+        # without the test actually waiting that long.
+        old_time = time.time() - 120
+        os.utime(lock_dir, (old_time, old_time))
+
+        result = _run(f"""
+        source {LIB_LOCK_SH}
+        _LOCK_MAX_HOLD_SECONDS=60
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """)
+        assert "ACQUIRED" in result.stdout, (
+            f"a live-but-hung holder older than the hold bound must be "
+            f"reclaimable: {result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_a_live_holder_within_the_hold_bound_is_not_stolen_from(tmp_path):
+    """Positive control for the test above: a live holder younger than
+    _LOCK_MAX_HOLD_SECONDS must still be refused, or the bound would not be
+    doing anything -- every live holder would simply be stealable."""
+    lock_dir = tmp_path / "fresh-live.lock"
+    lock_dir.mkdir()
+    holder = subprocess.Popen(["sleep", "5"])
+    try:
+        (lock_dir / "pid").write_text(str(holder.pid), encoding="utf-8")
+
+        result = _run(f"""
+        source {LIB_LOCK_SH}
+        _LOCK_MAX_HOLD_SECONDS=3600
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """)
+        assert "REFUSED" in result.stdout, (
+            f"a live holder well within the hold bound must not be stolen "
+            f"from: {result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_an_unreadable_pid_file_past_the_adopt_age_is_reclaimed_without_hanging(
+    tmp_path,
+):
+    """#1103: a dataless cloud-sync placeholder pid file blocks a plain `cat`
+    on the read syscall rather than returning content or an error (observed
+    at ~60s). Simulated here with a FIFO that has no writer, which blocks a
+    `cat` exactly the same way without depending on an actual sync client.
+    Once the lock directory is old enough, the bounded read must give up and
+    the lock must still be reclaimable -- and the whole call must return
+    well inside this test's own subprocess timeout, not hang."""
+    lock_dir = tmp_path / "dataless.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+    old_time = time.time() - 120
+    os.utime(lock_dir, (old_time, old_time))
+
+    result = _run(
+        f"""
+        source {LIB_LOCK_SH}
+        _LOCK_PID_READ_TIMEOUT=1
+        _LOCK_ADOPT_AFTER=60
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """,
+        timeout=20,
+    )
+    assert "ACQUIRED" in result.stdout, (
+        f"an unreadable pid file older than _LOCK_ADOPT_AFTER must be "
+        f"reclaimable without blocking: {result.stdout!r} {result.stderr!r}"
+    )
+
+
+def test_an_unreadable_pid_file_within_the_adopt_age_is_not_reclaimed(tmp_path):
+    """Positive control for the test above: the same unreadable (FIFO) pid
+    file, but too young to be debris, must still refuse -- otherwise every
+    unreadable pid would be reclaimed regardless of age, which is exactly
+    the holder-mid-acquisition case this guards against."""
+    lock_dir = tmp_path / "dataless-fresh.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+
+    result = _run(
+        f"""
+        source {LIB_LOCK_SH}
+        _LOCK_PID_READ_TIMEOUT=1
+        _LOCK_ADOPT_AFTER=3600
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """,
+        timeout=20,
+    )
+    assert "REFUSED" in result.stdout, (
+        f"an unreadable pid file younger than _LOCK_ADOPT_AFTER must not be "
+        f"reclaimed: {result.stdout!r} {result.stderr!r}"
     )
 
 
