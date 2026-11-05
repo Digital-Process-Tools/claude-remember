@@ -589,31 +589,40 @@ def test_an_unreadable_pid_file_is_refused_quickly_rather_than_hanging(
 def test_a_live_holder_is_never_stolen_from_even_when_its_pid_read_times_out(
     tmp_path,
 ):
-    """The double-timeout hazard from self-review, pinned directly: a REAL
-    live holder whose pid file happens to be slow to read (not permanently
-    stuck -- simulated with a fake, slow `cat` on PATH) must still be
-    refused, even though both the initial read and the post-rename
-    re-read of the renamed claim file would time out identically. A first
-    cut treated two timeouts as "confirmed unchanged" and stole the lock
-    out from under a holder that was alive and healthy the whole time."""
+    """A REAL live holder whose pid file read happens to be merely slow (not
+    permanently stuck) must still be refused rather than stolen from, the
+    same as the already-broken-forever case: `_lock_try_steal` refuses
+    unconditionally on ANY timed-out read before it ever looks at content,
+    so a transient slow read on a genuinely healthy holder is not treated
+    any more favourably than a permanently stuck one -- which is also what
+    closes the gap a first cut of this fix had (a timeout on the live
+    holder's own read being misread as "confirmed dead").
+
+    The pid file is a FIFO with a delayed writer: opening a FIFO for read
+    blocks until a writer opens it too (POSIX rendezvous semantics), so the
+    read genuinely resolves eventually -- it is not broken, just slower
+    than `_LOCK_PID_READ_TIMEOUT`. A first cut of this test instead
+    replaced `cat` on PATH with a freshly-written shell script simulating
+    the same delay, which hung unreproducibly on a macOS CI runner
+    (plausibly Gatekeeper's first-run signature check on a brand-new
+    executable -- not confirmed, but not reproducible locally either,
+    which is itself consistent with a CI-VM-specific, first-run-only
+    cost). A FIFO depends on nothing but kernel pipe semantics and the
+    system's own, already-trusted `sh`/`cat`."""
     lock_dir = tmp_path / "slow-live.lock"
     lock_dir.mkdir()
     holder = subprocess.Popen(["sleep", "10"])
-    bin_dir = tmp_path / "slowbin"
-    bin_dir.mkdir()
-    slow_cat = bin_dir / "cat"
-    slow_cat.write_text(
-        "#!/bin/sh\nsleep 30\nexec /bin/cat \"$@\"\n", encoding="utf-8"
+    pid_path = lock_dir / "pid"
+    os.mkfifo(pid_path)
+    writer = subprocess.Popen(
+        ["sh", "-c", f'sleep 5; printf "%s" "{holder.pid}" > "{pid_path}"']
     )
-    slow_cat.chmod(0o755)
     try:
-        (lock_dir / "pid").write_text(str(holder.pid), encoding="utf-8")
         old_time = time.time() - 120
         os.utime(lock_dir, (old_time, old_time))
 
         result = _run(
             f"""
-            PATH="{bin_dir}:$PATH"
             source {LIB_LOCK_SH}
             _LOCK_PID_READ_TIMEOUT=1
             _LOCK_ADOPT_AFTER=5
@@ -625,12 +634,18 @@ def test_a_live_holder_is_never_stolen_from_even_when_its_pid_read_times_out(
             f"a live holder must never be stolen from merely because its "
             f"pid read was slow: {result.stdout!r} {result.stderr!r}"
         )
-        assert (lock_dir / "pid").read_text(encoding="utf-8").strip() == str(
-            holder.pid
-        ), "the original holder's pid must be left exactly as it was"
     finally:
         holder.terminate()
         holder.wait(timeout=10)
+        # Not writer.wait(): if the acquire call refused and exited before
+        # the backgrounded `cat` it killed ever completed the FIFO's
+        # read-side open(), no read-side open() ever happens again, and the
+        # writer's own (blocking) open() for write then hangs forever
+        # waiting for a peer that will never arrive. SIGKILL unblocks a
+        # process stuck in open() the same way it does for any blocking
+        # syscall -- waiting for it to exit on its own is what hung here.
+        writer.kill()
+        writer.wait(timeout=10)
 
 
 def test_a_confirmed_empty_and_old_pid_file_is_still_reclaimed(tmp_path):

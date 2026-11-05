@@ -169,7 +169,7 @@ _LOCK_PID_READ_TIMEOUT="${REMEMBER_LOCK_PID_READ_TIMEOUT:-2}"
 # unblocks the background job here -- not a cooperative check the blocked
 # `cat` could ever perform itself.
 _lock_read_pid_timeout() {
-    local _file="$1" _tmp _cat_pid _deadline
+    local _file="$1" _tmp _cat_pid _max_iters _iters=0
     _LOCK_PID_READ_RESULT=""
     _tmp=$(mktemp "${TMPDIR:-/tmp}/remember-pidread-XXXXXX" 2>/dev/null) || {
         # No scratch file to redirect into, so there is nowhere to background
@@ -191,15 +191,32 @@ _lock_read_pid_timeout() {
     }
     ( cat "$_file" > "$_tmp" 2>/dev/null ) &
     _cat_pid=$!
-    _deadline=$(( $(date +%s) + _LOCK_PID_READ_TIMEOUT ))
+    # Bounded by an ITERATION COUNT, never by reading a clock: a `date` fork
+    # to compute a deadline would run on every single call to this function,
+    # whether or not the backgrounded read is ever still running by the time
+    # the loop below is reached -- found in CI, not locally (#1056's own
+    # fork-reduction test caught it): _lock_release_impl's now-unconditional
+    # call into this function started forking `date` on every lock_release,
+    # including the uncontended fast path that test asserts never forks it.
+    # _LOCK_SLEEP's own two possible values are already known without a
+    # fork (set once, at source time, by the `sleep 0.001` probe above), so
+    # the same `_LOCK_PID_READ_TIMEOUT`-second bound is expressible as a
+    # plain iteration count instead, at zero cost on the common case where
+    # the loop body never runs at all.
+    if [ "$_LOCK_SLEEP" = 1 ]; then
+        _max_iters="$_LOCK_PID_READ_TIMEOUT"
+    else
+        _max_iters=$(( _LOCK_PID_READ_TIMEOUT * 20 ))
+    fi
     while kill -0 "$_cat_pid" 2>/dev/null; do
-        if [ "$(date +%s)" -ge "$_deadline" ]; then
+        if [ "$_iters" -ge "$_max_iters" ]; then
             kill "$_cat_pid" 2>/dev/null || true
             wait "$_cat_pid" 2>/dev/null || true
             rm -f "$_tmp" 2>/dev/null || true
             return 1
         fi
         sleep "$_LOCK_SLEEP"
+        _iters=$(( _iters + 1 ))
     done
     wait "$_cat_pid" 2>/dev/null || true
     _LOCK_PID_READ_RESULT=$(cat "$_tmp" 2>/dev/null) || true
