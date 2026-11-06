@@ -92,3 +92,29 @@ def test_uncontended_lock_acquire_forks_neither_dirname_nor_date_1056(tmp_path):
         f"an uncontended lock_acquire (first mkdir succeeds) still forks "
         f"dirname and/or date for values nothing ends up reading: {offending}"
     )
+
+
+@_needs_coreutils_shims
+def test_uncontended_acquire_release_forks_cat_exactly_once_1101_1103(tmp_path):
+    """Self-review follow-up to #1101/#1103, finding 4: _lock_release_impl's
+    read of its OWN pid file always went through the full timed-read
+    machinery (mktemp + a backgrounded cat + a SECOND cat draining the
+    scratch file + rm), even on the fast, uncontended release every
+    PostToolUse save takes. The drain step forked cat a second time for no
+    reason: the scratch file it reads is one this same function just wrote
+    moments ago via mktemp, never the caller's own (possibly dataless)
+    file the bound exists to guard, so a bash builtin read ($(<file)) is
+    exactly as safe there and costs one fork less. An uncontended
+    acquire+release round trip (the first mkdir just succeeds, so
+    _lock_try_steal is never reached) calls the timed read exactly once --
+    from release -- so there must be exactly one cat fork in the whole
+    chain: not two (the pre-fix drain), and not zero (which would mean the
+    bounded background read itself vanished, not just the redundant
+    drain)."""
+    recorded = _uncontended_acquire_spawns(tmp_path)
+    cats = [s for s in recorded if s.startswith("cat ")]
+    assert len(cats) == 1, (
+        f"an uncontended acquire+release forked cat {len(cats)} times -- "
+        f"expected exactly one (the bounded background read of the pid "
+        f"file release owns): {cats}"
+    )

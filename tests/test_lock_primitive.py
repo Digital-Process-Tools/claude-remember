@@ -649,6 +649,61 @@ def test_a_live_holder_is_never_stolen_from_even_when_its_pid_read_times_out(
         writer.wait(timeout=10)
 
 
+def test_a_reader_that_ignores_sigterm_is_still_bounded(tmp_path):
+    """Self-review follow-up to #1103: this function's own comment asserts
+    a SIGTERM to a process blocked in a slow read() unblocks it because no
+    handler is installed. A reader that DOES install one and ignores
+    SIGTERM -- or one genuinely stuck in the kernel's own uninterruptible
+    I/O wait -- left the `kill` a no-op and the unconditional `wait`
+    straight after it blocked with no timeout of its own. Confirmed
+    directly (not merely reasoned) before this fix: a `cat` shim here that
+    traps and ignores TERM made `_lock_read_pid_timeout` -- called with
+    `_LOCK_PID_READ_TIMEOUT=1` -- run for as long as the shim's own long
+    sleep did, well past a 10s wrapper timeout. The fix must escalate past
+    a SIGTERM that did not land rather than wait on it unconditionally."""
+    lock_dir = tmp_path / "ignores-term.lock"
+    lock_dir.mkdir()
+    pid_path = lock_dir / "pid"
+    os.mkfifo(pid_path)
+    bindir = tmp_path / "bin-sigterm-ignoring"
+    bindir.mkdir()
+    shim = bindir / "cat"
+    shim_body = (
+        "#!/bin/sh\n"
+        'target="' + str(pid_path) + '"\n'
+        'if [ "$1" = "$target" ]; then\n'
+        "    trap '' TERM\n"
+        "    sleep 30\n"
+        "else\n"
+        '    exec /bin/cat "$@"\n'
+        "fi\n"
+    )
+    shim.write_text(shim_body, encoding="utf-8")
+    shim.chmod(0o755)
+
+    t0 = time.time()
+    result = _run(
+        f"""
+        PATH="{bindir}:$PATH"
+        source {LIB_LOCK_SH}
+        _LOCK_PID_READ_TIMEOUT=1
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """,
+        timeout=10,
+    )
+    elapsed = time.time() - t0
+    assert "REFUSED" in result.stdout, (
+        f"a reader that ignores SIGTERM must still be bounded and refused, "
+        f"never acquired: {result.stdout!r} {result.stderr!r}"
+    )
+    assert elapsed < 8, (
+        f"a reader that ignores SIGTERM must not be waited on unconditionally "
+        f"-- this took {elapsed:.1f}s against a _LOCK_PID_READ_TIMEOUT of 1s "
+        f"and a 30s-sleeping shim, meaning the kill/wait path escalated "
+        f"rather than blocking on it: {result.stdout!r} {result.stderr!r}"
+    )
+
+
 def test_a_confirmed_empty_and_old_pid_file_is_still_reclaimed(tmp_path):
     """Second-review finding: an earlier cut of the timeout-refusal fix
     collapsed the confirmed-empty-pid branch and the timed-out-read branch
@@ -691,6 +746,58 @@ def test_a_confirmed_empty_but_fresh_pid_file_is_not_reclaimed(tmp_path):
     assert "REFUSED" in result.stdout, (
         f"a fresh, confirmed-empty pid file must not be reclaimed: "
         f"{result.stdout!r} {result.stderr!r}"
+    )
+
+
+def test_a_non_numeric_and_old_pid_file_is_still_reclaimed(tmp_path):
+    """Self-review follow-up to #1101/#1103: `_lock_try_steal` judges a
+    non-numeric pid file (e.g. "abc") the same branch as an empty one, but
+    an earlier cut cleared `$_pid` to "" right there -- before the
+    post-rename re-read that compares against it. The re-read then saw the
+    REAL content again ("abc"), compared it to the empty string it could
+    never equal, restored the file and refused -- every time, however old
+    the directory. A non-numeric pid file could never be reclaimed at all
+    (confirmed by reproduction: mkdir, write "abc", backdate the directory,
+    `lock_acquire ... 0` returns REFUSED and the pid file is still "abc")."""
+    lock_dir = tmp_path / "non-numeric.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("abc", encoding="utf-8")
+    old_time = time.time() - 120
+    os.utime(lock_dir, (old_time, old_time))
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _LOCK_ADOPT_AFTER=5
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+    """)
+    assert "ACQUIRED" in result.stdout, (
+        f"a non-numeric, old pid file must be reclaimable -- the same as "
+        f"the already-covered empty-pid case: {result.stdout!r} "
+        f"{result.stderr!r}"
+    )
+
+
+def test_a_non_numeric_but_fresh_pid_file_is_not_reclaimed(tmp_path):
+    """Positive control for the test above: the same non-numeric pid file,
+    but too young to be debris, must still refuse -- otherwise the age gate
+    above would not be doing anything and every non-numeric pid file would
+    be reclaimed on sight, holder-mid-acquisition included."""
+    lock_dir = tmp_path / "non-numeric-fresh.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("abc", encoding="utf-8")
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _LOCK_ADOPT_AFTER=3600
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+    """)
+    assert "REFUSED" in result.stdout, (
+        f"a fresh, non-numeric pid file must not be reclaimed: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert (lock_dir / "pid").read_text() == "abc", (
+        "a refused steal must leave the original, non-numeric pid file "
+        "content in place"
     )
 
 
@@ -753,6 +860,90 @@ def test_release_refuses_rather_than_removes_on_a_timed_out_pid_read(tmp_path):
     )
     assert lock_dir.exists(), (
         "a refused release must leave the lock directory in place"
+    )
+
+
+def test_release_does_not_destroy_a_lock_a_concurrent_steal_just_won(tmp_path):
+    """Self-review follow-up to #1101/#1103, finding 3: a holder judged
+    stale (alive, but held past _LOCK_MAX_HOLD_SECONDS) races its own
+    legitimate release against a stealer taking the lock over. The read at
+    the top of _lock_release_impl and the rm -rf at the bottom are two
+    separate operations; a steal landing in between rewrites the pid file
+    to the new owner's, and nothing re-checked that before this fix --
+    rm -rf fired unconditionally once the FIRST check passed, deleting the
+    new owner's lock. A third process would then recreate the directory
+    and two holders would exist.
+
+    Deterministic, not concurrent: _lock_self_set is overridden to run a
+    real _lock_try_steal, in a subshell so it gets its own distinct
+    identity via BASHPID exactly as a second process would, exactly once,
+    synchronously inside the first call _lock_release_impl makes to it --
+    the precise window between release's own pid read and its (fixed)
+    atomic re-verify.
+    """
+    lock_dir = tmp_path / "race-release-steal.lock"
+    lock_dir.mkdir()
+    stealer_id_path = tmp_path / "stealer_id.txt"
+    steal_rc_path = tmp_path / "steal.rc"
+    script = f"""
+    source {LIB_LOCK_SH}
+    _LOCK_MAX_HOLD_SECONDS=0
+    echo "$$" > "{lock_dir}/pid"
+    _STEAL_FIRED=0
+    _lock_self_set() {{
+        _LOCK_SELF="${{BASHPID:-$$}}"
+        if [ "$_STEAL_FIRED" != 1 ]; then
+            _STEAL_FIRED=1
+            (
+                _lock_try_steal "{lock_dir}" >/dev/null 2>&1
+                echo $? > "{steal_rc_path}"
+                echo "${{BASHPID:-$$}}" > "{stealer_id_path}"
+            )
+        fi
+    }}
+    lock_release "{lock_dir}"
+    echo "release_rc=$?"
+    """
+    result = _run(script)
+    assert result.returncode == 0, result.stderr
+    assert "release_rc=1" in result.stdout, (
+        f"a release racing a concurrent steal that already won must refuse, "
+        f"not report success: {result.stdout!r} {result.stderr!r}"
+    )
+    assert steal_rc_path.read_text().strip() == "0", (
+        f"the concurrent steal itself must have won for this to be a "
+        f"meaningful test of the race, not a vacuous pass: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert lock_dir.exists(), (
+        "the stale holder's release destroyed the lock directory the "
+        "concurrent steal had already taken over"
+    )
+    stealer_id = stealer_id_path.read_text().strip()
+    pid_file = lock_dir / "pid"
+    pid_now = pid_file.read_text().strip() if pid_file.exists() else "<missing>"
+    assert pid_now == stealer_id, (
+        f"the pid file no longer holds the stealer's own pid ({stealer_id!r}) "
+        f"after the stale holder's release ran -- got {pid_now!r}"
+    )
+
+
+def test_release_of_an_owned_uncontended_lock_still_succeeds(tmp_path):
+    """Positive control for the test above: without a concurrent steal, the
+    atomic re-verify the fix adds before rm -rf must not turn an ordinary,
+    uncontested release into a false refusal."""
+    lock_dir = tmp_path / "uncontended.lock"
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    lock_acquire "{lock_dir}" 0 || {{ echo ACQUIRE_FAILED; exit 0; }}
+    lock_release "{lock_dir}" && echo RELEASED || echo REFUSED
+    """)
+    assert "RELEASED" in result.stdout, (
+        f"an ordinary, uncontested release must still succeed: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert not lock_dir.exists(), (
+        "an ordinary release must still remove the lock directory"
     )
 
 

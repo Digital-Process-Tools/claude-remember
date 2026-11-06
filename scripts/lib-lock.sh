@@ -221,7 +221,21 @@ _lock_read_pid_timeout() {
     while kill -0 "$_cat_pid" 2>/dev/null; do
         if [ "$_iters" -ge "$_max_iters" ]; then
             kill "$_cat_pid" 2>/dev/null || true
-            wait "$_cat_pid" 2>/dev/null || true
+            # SIGTERM alone has no bound of its own: a reader that ignores
+            # it, or one genuinely stuck in the kernel's own uninterruptible
+            # read, leaves an unconditional `wait` here blocked with no
+            # timeout -- reproduced directly with a `cat` shim that traps
+            # and ignores TERM, which hung this function well past
+            # _LOCK_PID_READ_TIMEOUT. One more sleep gives a cooperative
+            # reader a chance to exit from the SIGTERM already sent; past
+            # that, escalate to SIGKILL, which nothing can ignore or block
+            # short of the kernel's own I/O still being in flight -- and
+            # even then this function must still return on schedule, so it
+            # does not `wait` for the kill to land either. The process is
+            # left for init to reap rather than for this function to wait
+            # on further.
+            sleep "$_LOCK_SLEEP"
+            kill -0 "$_cat_pid" 2>/dev/null && kill -9 "$_cat_pid" 2>/dev/null
             rm -f "$_tmp" 2>/dev/null || true
             return 1
         fi
@@ -229,7 +243,14 @@ _lock_read_pid_timeout() {
         _iters=$(( _iters + 1 ))
     done
     wait "$_cat_pid" 2>/dev/null || true
-    _LOCK_PID_READ_RESULT=$(cat "$_tmp" 2>/dev/null) || true
+    # $(<file) is a bash builtin read, not a forked `cat` -- one fewer
+    # process on every single call to this function, fast path included
+    # (self-review follow-up to #1101/#1103, finding 4). Safe here
+    # specifically because $_tmp is always a local scratch file this
+    # function itself just wrote via mktemp moments ago, never the
+    # caller's own (possibly dataless) file -- the bound above still
+    # applies to that one.
+    _LOCK_PID_READ_RESULT=$(<"$_tmp") || true
     rm -f "$_tmp" 2>/dev/null || true
     return 0
 }
@@ -304,7 +325,15 @@ _lock_try_steal() {
     # would.
     if [ -z "$_pid" ] || [[ "$_pid" == *[!0-9]* ]]; then
         [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_ADOPT_AFTER" ] || return 1
-        _pid=""
+        # $_pid is left exactly as read -- NOT cleared to "" here. The
+        # post-rename re-read below (`_seen != $_pid`) exists to confirm
+        # nothing changed underneath the rename, by comparing against
+        # whatever this branch actually saw. Clearing a non-numeric $_pid to
+        # "" broke exactly that: the re-read then saw the real content again
+        # (e.g. "abc"), compared it against the empty string it could never
+        # equal, and the steal was restored and refused every time -- a
+        # non-numeric pid file could never be reclaimed, however old
+        # (confirmed by reproduction, not merely reasoned).
     # Alive is not the same as healthy: a holder that hangs forever --
     # blocked on I/O, a wedged pipe -- is live by `kill -0` indefinitely
     # (#1101). Bound how long ANY live holder may keep the lock before a
@@ -920,7 +949,7 @@ lock_release() {
 }
 
 _lock_release_impl() {
-    local _dir="$1" _pid
+    local _dir="$1" _pid _claim _seen
     if _lock_read_pid_timeout "${_dir}/pid"; then
         _pid="$_LOCK_PID_READ_RESULT"
     else
@@ -940,6 +969,42 @@ _lock_release_impl() {
     if [ -n "$_pid" ] && [ "$_pid" != "$_LOCK_SELF" ]; then
         return 1
     fi
+
+    # The read above and the `rm -rf` below are two separate operations, and
+    # a steal can land in between: a holder judged stale (> _LOCK_MAX_HOLD_
+    # SECONDS, #1101) while it is ALIVE and about to release legitimately
+    # races a stealer that renames the pid file, re-reads it, and writes its
+    # own pid -- all while this release is still only holding the pid VALUE
+    # it read earlier, not the file itself. Nothing stopped the `rm -rf`
+    # below from firing after that takeover completed, deleting the new
+    # owner's lock out from under it; a third process then recreates the
+    # directory and two holders exist. Closed the same way `_lock_try_steal`
+    # already closes its own single-winner race: rename the pid file OUT
+    # from under the directory first. Whichever of this release's rename or
+    # a concurrent steal's rename happens first wins; the other gets ENOENT
+    # (or a content mismatch on re-read) and backs off instead of
+    # proceeding on stale information.
+    _claim="${_dir}/pid.releasing.${_LOCK_SELF}"
+    if ! mv "${_dir}/pid" "$_claim" 2>/dev/null; then
+        return 1
+    fi
+    # A plain builtin read here, not another bounded _lock_read_pid_timeout
+    # call: $_claim is the SAME file the read at the top of this function
+    # already proved readable microseconds ago (just renamed, not freshly
+    # encountered), so the #1103 dataless-placeholder hazard that read
+    # exists to bound does not reapply to it -- and a second bounded call
+    # here would otherwise double this function's own fork count on every
+    # single release, undoing the saving finding 4 made.
+    _seen=$(<"$_claim") 2>/dev/null
+    if [ "$_seen" != "$_pid" ]; then
+        # The pid file no longer holds what we read moments ago -- a
+        # stealer already won the race and rewrote it. Restore what we
+        # actually took (the new owner's claim, not our stale belief) and
+        # refuse rather than destroying a lock we no longer own.
+        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        return 1
+    fi
+    rm -f "$_claim" 2>/dev/null || true
     rm -rf "$_dir" 2>/dev/null || true
     return 0
 }
