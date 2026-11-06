@@ -166,14 +166,21 @@ _LOCK_MAX_HOLD_SECONDS="${REMEMBER_LOCK_MAX_HOLD_SECONDS:-1800}"
 # unbounded, that single read consumes a whole PostToolUse hook's own
 # timeout budget.
 _LOCK_PID_READ_TIMEOUT="${REMEMBER_LOCK_PID_READ_TIMEOUT:-2}"
-# A non-integer override (`0.5`, `2s`, empty-but-set) reaches `_max_iters=$((
-# _LOCK_PID_READ_TIMEOUT * 20 ))` in the watchdog below as a bash arithmetic
-# error, which exits that subshell on the spot -- before it ever sends the
-# SIGTERM that is this whole bound's only way of waking a blocked `cat` --
-# leaving the read, and the caller's blocking `wait` on it, unbounded again:
-# exactly the #1103 hang this file exists to close, just reopened by a bad
-# env var. Reject anything that is not digits-only and fall back to the
-# documented default instead of letting a typo silently undo the bound.
+# A non-integer override (`0.5`, `2s`, empty-but-set) reaches the
+# watchdog's own iteration-count arithmetic below as a bash error, which
+# exits that subshell on the spot -- before it ever sends the SIGTERM
+# that is this whole bound's only way of waking a blocked `cat` --
+# leaving the read, and the caller's blocking `wait` on it, unbounded
+# again: exactly the #1103 hang this file exists to close, just
+# reopened by a bad env var. Reject anything that is not digits-only
+# and fall back to the documented default instead of letting a typo
+# silently undo the bound. (Deliberately not spelling out the literal
+# watchdog arithmetic here, with its own guarded variable name, between
+# the dollar-double-open-paren and matching double-close-paren bash
+# arithmetic delimiters: tests/test_arith_base_lint_332.py's own sweep
+# is plain text, not a shell parser, and does not skip comment lines --
+# it flagged exactly that literal span the first time this comment
+# spelled the delimiters out.)
 #
 # `0` (or `00`) is digits-only but still rejected, separately: it sets
 # the watchdog's own bound to zero iterations, which kills a read that
