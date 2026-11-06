@@ -203,3 +203,167 @@ def test_uncontended_acquire_release_does_not_pay_the_timeout_bound_1101_1103(
         f"must not be paid on the fast, uncontended path): "
         f"{result.stdout!r} {result.stderr!r}"
     )
+
+
+def _candidate_bashes() -> list[tuple[str, str]]:
+    """Every distinct bash worth checking the stderr-silence fix against.
+
+    The notification this fix removes was observed directly to be
+    bash-VERSION-dependent, not universal: killing a still-job-tracked,
+    multi-statement background subshell (the watchdog's exact shape)
+    produced the notification under macOS's shipped /bin/bash (3.2, no
+    $BASHPID -- also what CI's macos-latest runner resolves "bash" to,
+    confirmed earlier in this same issue's own fork-count tests) but was
+    observed NOT to reproduce under a newer homebrew bash on the same
+    machine. A dev machine where `BASH` (resolve_bash(), PATH-based)
+    happens to resolve to that newer bash would let every assertion below
+    pass trivially, for the wrong reason, if it only ever ran against
+    `BASH`. Checking both -- `BASH` (whatever this run's "bash" on PATH
+    is, covering CI) and literal "/bin/bash" when present (covering a dev
+    machine where PATH resolves elsewhere) -- is what the scheduler's own
+    "check it on /bin/bash 3.2 and a newer bash" asked for, and is also
+    exactly how the positive control test below caught this gap while
+    these tests were being written.
+    """
+    seen: dict[str, str] = {}
+    if BASH:
+        seen.setdefault(os.path.realpath(BASH), BASH)
+    if sys.platform != "win32" and Path("/bin/bash").is_file():
+        seen.setdefault(os.path.realpath("/bin/bash"), "/bin/bash")
+    return [(path, path) for path in seen.values()]
+
+
+_BASH_IDS = [label for label, _ in _candidate_bashes()] or ["no-bash"]
+_BASH_PARAMS = [path for _, path in _candidate_bashes()] or [None]
+_skip_no_bash = pytest.mark.skipif(
+    not _candidate_bashes(), reason="no usable bash found -- see BASH skip above",
+)
+
+
+@_skip_no_bash
+@pytest.mark.parametrize("bash_path", _BASH_PARAMS, ids=_BASH_IDS)
+def test_an_uncontended_lock_cycle_writes_nothing_to_stderr_1101_1103(
+    tmp_path, bash_path,
+):
+    """Scheduler-measured follow-up: nearly every release of an uncontended
+    lock printed a bash job-control notification to stderr --
+    `scripts/lib-lock.sh: line 181: <pid> Terminated: 15  ( if [ ... ) `
+    -- because `_lock_read_pid_timeout`'s watchdog subshell was explicitly
+    `kill`ed while still tracked in this shell's own job table. That kill
+    is what a hook runner's own stderr would surface on every save; a
+    `</dev/null >/dev/null 2>&1` on the subshell itself cannot reach it,
+    because the notification is printed by THIS shell's bookkeeping when
+    it next notices, not by the subshell being signalled.
+    """
+    N = 20
+    script = f"""
+    source "{LIB_LOCK_SH}"
+    for i in $(seq 1 {N}); do
+        D="{tmp_path}/quiet-$i.lock"
+        rm -rf "$D"
+        lock_acquire "$D" 0 >/dev/null
+        lock_release "$D" >/dev/null
+    done
+    """
+    result = subprocess.run(
+        [bash_path, "-c", script],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert result.stderr == "", (
+        f"an uncontended lock_acquire+lock_release loop wrote to stderr -- "
+        f"this is bash's own job-control notification for the watchdog "
+        f"subshell being killed while still in the job table, visible to "
+        f"anything that runs a save hook and would otherwise see a clean "
+        f"run ({bash_path}): {result.stderr!r}"
+    )
+
+
+@_skip_no_bash
+@pytest.mark.parametrize("bash_path", _BASH_PARAMS, ids=_BASH_IDS)
+def test_a_timed_out_pid_read_also_writes_nothing_to_stderr_1101_1103(
+    tmp_path, bash_path,
+):
+    """Same finding, the #1103 escalation path: a dataless pid file (here a
+    FIFO with no writer, same simulation `test_an_unreadable_pid_file_is_
+    refused_quickly_rather_than_hanging` in test_lock_primitive.py uses)
+    forces the watchdog to actually fire its own kill of `cat`, racing the
+    explicit kill of the watchdog itself -- confirmed by direct repro to
+    produce the identical stderr notification as the fast path above, not
+    a different one tied to killing `cat`.
+    """
+    lock_dir = tmp_path / "dataless-quiet.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+    script = f"""
+    source "{LIB_LOCK_SH}"
+    _LOCK_PID_READ_TIMEOUT=1
+    lock_acquire "{lock_dir}" 0 >/dev/null
+    """
+    result = subprocess.run(
+        [bash_path, "-c", script],
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+    assert result.stderr == "", (
+        f"a timed-out pid-file read wrote to stderr ({bash_path}): "
+        f"{result.stderr!r}"
+    )
+
+
+@_skip_no_bash
+@pytest.mark.parametrize("bash_path", _BASH_PARAMS, ids=_BASH_IDS)
+def test_the_stderr_assertions_above_would_catch_a_real_regression_1101_1103(
+    bash_path,
+):
+    """Positive control for the two tests above: proves the harness can
+    actually SEE bash's own job-control notification in the first place,
+    using the identical shape the real watchdog has (a backgrounded
+    subshell running MULTIPLE statements, including a sleep, explicitly
+    killed while still tracked in the job table) -- without this, a
+    harness that silently failed to capture stderr at all would let the
+    two "writes nothing" tests above pass for the wrong reason.
+
+    This control is itself what caught the bash-version dependency
+    documented on `_candidate_bashes` above: a single-simple-command
+    subshell (`( sleep 1 ) &`) does NOT reproduce the notification at all
+    (bash's exec-optimization means `$!` there is the real `sleep`
+    itself, not a wrapper), and a lone kill-and-echo of the multi-statement
+    shape, run only once, also failed to reproduce it reliably even on
+    macOS's shipped /bin/bash -- repeating the pattern in a loop (as the
+    real fast-path repro and this file's own two tests above already do,
+    both using a `for` loop over many lock cycles) is what made it
+    reliable, confirmed by direct repro before writing this test. A newer
+    homebrew bash on the same dev machine that found this bug never
+    printed the notification for this script even looped. A bash that
+    cannot demonstrate the notification here is SKIPPED rather than
+    failed: the two "writes nothing" tests for that same bash are then
+    true but vacuous, since there is nothing they could have caught on a
+    bash that never made this noise regardless.
+    """
+    script = """
+    for i in $(seq 1 5); do
+        (
+            x=1
+            while :; do
+                sleep 0.2
+                x=$(( x + 1 ))
+            done
+        ) </dev/null >/dev/null 2>&1 &
+        p=$!
+        sleep 0.05
+        kill "$p" 2>/dev/null
+    done
+    echo after_loop
+    """
+    result = subprocess.run(
+        [bash_path, "-c", script],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    if result.stderr == "":
+        pytest.skip(
+            f"{bash_path} never prints bash's own job-control notification "
+            f"for a killed, non-disowned multi-statement background "
+            f"subshell -- the 'writes nothing to stderr' tests above are "
+            f"true but vacuous on this bash, confirmed observationally, "
+            f"not assumed"
+        )

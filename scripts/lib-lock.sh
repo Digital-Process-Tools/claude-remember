@@ -285,6 +285,23 @@ _lock_read_pid_timeout() {
     # directly is the same class of cost this closes off entirely.
     ) </dev/null >/dev/null 2>&1 &
     _watchdog_pid=$!
+    # `disown` here, not left to the shell's own job table: a signal-killed
+    # background job that is STILL in the job table gets an unconditional
+    # "Terminated: 15" line on this shell's own stderr the next time it
+    # notices (observed on EVERY call, both the common fast path -- where
+    # the kill below fires on a watchdog that is still asleep -- and the
+    # #1103 timeout/escalation path, where the watchdog is what gets
+    # raced by the very kill meant to stop it promptly). This is bash's
+    # own async job-control notification, not something `2>/dev/null` on
+    # the kill or the surrounding subshell's own redirections can reach,
+    # because it is printed by THIS shell's bookkeeping, not by the job
+    # being signalled. `disown` removes the watchdog from that bookkeeping
+    # the moment its pid is known -- before anything could ever kill it --
+    # which silences the notification unconditionally, on every bash this
+    # function runs under (including bash 3.2), with no change to timing:
+    # this function never `wait`s on the watchdog, so losing the ability
+    # to read ITS exit status (what `disown` costs here) costs nothing.
+    disown "$_watchdog_pid" 2>/dev/null || true
     wait "$_cat_pid" 2>/dev/null
     _rc=$?
     # The watchdog is done being useful the instant `wait` above returns,
