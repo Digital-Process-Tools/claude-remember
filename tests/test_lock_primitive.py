@@ -27,6 +27,7 @@ intervals, and a disjointness test that cannot resolve an overlap would be
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -979,6 +980,119 @@ def test_a_stranded_adopt_marker_does_not_wedge_the_lock_forever(tmp_path):
     assert (lock_dir / "pid").exists()
 
 
+# ---------------------------------------------------------------------------
+# #1108 -- Ubuntu 26.04 (ubuntu-latest) lost mutual exclusion at rates up to
+# 10/10 rounds on `test_no_two_holders_overlap`, never on ubuntu-24.04, macOS
+# or Windows in the same CI run (run 42110563194). Hypothesis: that image's
+# default coreutils (uutils, Rust) makes `mkdir` report success for a
+# directory that already existed -- not reproducible on any platform this
+# suite runs on without a shim, since the real `mkdir` everywhere else in
+# scope (GNU, BSD, the Windows bash shell) is a single exclusive syscall. The
+# shim below forces exactly that shape deterministically, on any platform,
+# the same way _stat_shim above forces the GNU/BSD split without needing
+# both OSes.
+# ---------------------------------------------------------------------------
+
+# `command mkdir` would NOT reach the real binary here: this shim's own
+# directory is first on PATH for the very subprocess that runs it, so a
+# fresh lookup from inside the shim finds the shim again -- unbounded
+# self-recursion until the OS fork limit kills it, with the real mkdir(1)
+# never once invoked (confirmed: 2108 nested invocations logged, directory
+# never created). Resolving the real binary's absolute path OUTSIDE the
+# PATH-overridden subprocess, once, and baking that path into the shim,
+# is what avoids it.
+_REAL_MKDIR = shutil.which("mkdir") or "/bin/mkdir"
+
+_NONEXCLUSIVE_MKDIR_SHIM = f"""#!/bin/sh
+# Simulates a `mkdir` that does not guarantee exclusivity: it calls the real
+# mkdir and always reports success regardless of the real outcome, mirroring
+# the symptom hypothesised for Ubuntu 26.04's uutils coreutils in #1108 -- a
+# caller that trusts this exit code alone cannot tell "I just created this"
+# from "this already existed".
+{_REAL_MKDIR} "$@" 2>/dev/null
+exit 0
+"""
+
+
+def _nonexclusive_mkdir_shim(tmp_path) -> Path:
+    """Install the fake `mkdir` above and return the bin dir to prepend to PATH."""
+    bindir = tmp_path / "bin-nonexclusive-mkdir"
+    bindir.mkdir()
+    shim = bindir / "mkdir"
+    shim.write_text(_NONEXCLUSIVE_MKDIR_SHIM, encoding="utf-8")
+    shim.chmod(0o755)
+    return bindir
+
+
+def test_mkdir_shim_harness_detects_a_real_double_entry(tmp_path):
+    """Positive control for the fix test below: proof the shim forces the
+    shape this file exists to test -- a mkdir that reports success against a
+    directory that already exists -- rather than merely failing to observe
+    anything. Sequential, not concurrent: nothing here depends on process
+    scheduling, because the shimmed mkdir lies about exclusivity
+    unconditionally, not only under a race.
+    """
+    bindir = _nonexclusive_mkdir_shim(tmp_path)
+    lock_dir = tmp_path / "trust-only.lock"
+    result = _run(f"""
+    PATH="{bindir}:$PATH"
+    mkdir "{lock_dir}" 2>/dev/null && echo FIRST_MKDIR_OK
+    mkdir "{lock_dir}" 2>/dev/null && echo SECOND_MKDIR_OK
+    """)
+    assert result.returncode == 0, result.stderr
+    assert "FIRST_MKDIR_OK" in result.stdout, (
+        f"the shim refused even the first, genuine mkdir: {result.stdout} "
+        f"{result.stderr}"
+    )
+    assert "SECOND_MKDIR_OK" in result.stdout, (
+        "the shim did not report success for a second mkdir against the "
+        "SAME already-existing directory, so this shim is not forcing the "
+        f"shape this file exists to test: {result.stdout} {result.stderr}"
+    )
+
+
+def test_mkdir_success_alone_is_not_trusted_1108(tmp_path):
+    """#1108: a mkdir that reports success for a directory that already
+    exists -- the Ubuntu 26.04 shape -- must not cost mutual exclusion.
+    lock_acquire has to confirm it actually won with a second, bash-native
+    guard, exactly as _lock_try_adopt already does for the adoption path
+    (the noclobber comment above it). That guard is an O_EXCL-style
+    open(2) done by bash's own redirection, not an external binary, so it
+    does not depend on mkdir -- or any other coreutils command -- being
+    exclusive on the host.
+
+    Sequential, not concurrent, and deliberately so: the first lock_acquire
+    genuinely creates the directory and never releases it, so the second
+    call's mkdir reports success against a lock that is provably still
+    held -- a shape that can never be a valid second acquisition, with no
+    scheduler race needed to produce it.
+    """
+    bindir = _nonexclusive_mkdir_shim(tmp_path)
+    lock_dir = tmp_path / "shimmed.lock"
+    result = _run(f"""
+    PATH="{bindir}:$PATH"
+    source {LIB_LOCK_SH}
+    lock_acquire "{lock_dir}" 0 && echo FIRST_ACQUIRED
+    lock_acquire "{lock_dir}" 0 && echo SECOND_ACQUIRED || echo SECOND_REFUSED
+    """)
+    assert result.returncode == 0, result.stderr
+    assert "FIRST_ACQUIRED" in result.stdout, (
+        f"the first, genuine acquisition did not succeed: {result.stdout} "
+        f"{result.stderr}"
+    )
+    assert "SECOND_ACQUIRED" not in result.stdout, (
+        f"a second lock_acquire succeeded while the first call's own "
+        f"process still held the lock, purely because the shimmed mkdir "
+        f"reported success for an already-existing directory (the Ubuntu "
+        f"26.04 shape hypothesised in #1108): {result.stdout} {result.stderr}"
+    )
+    assert "SECOND_REFUSED" in result.stdout, (
+        f"the second call neither acquired nor refused -- it did not run "
+        f"the branch this test exists to check at all: {result.stdout} "
+        f"{result.stderr}"
+    )
+
+
 def test_a_fresh_adopt_marker_is_left_alone(tmp_path):
     """The same state means "an adopter is mid-adoption" for the first moments.
     Clearing the marker then would let a second process adopt alongside it."""
@@ -1141,5 +1255,120 @@ def test_an_adopter_that_exits_leaves_a_lock_the_next_contender_takes_over(tmp_p
     assert "SECOND" in result.stdout, (
         f"a lock left held by a dead adopter blocked the next contender — that "
         f"is the permanent outage #198 was filed for: {result.stdout} "
+        f"{result.stderr}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# #1108 review round 2 -- the fix above left two more spots that trusted a
+# write without the same noclobber guard, or fell through without checking
+# whether anyone actually won.
+# ---------------------------------------------------------------------------
+
+
+def test_a_stealer_refuses_a_pid_that_appears_after_its_rename_1108(tmp_path):
+    """#1108 review: a contender whose own `mkdir` falsely reported success
+    (the Ubuntu 26.04 shape this PR assumes) can write its own pid into the
+    exact window `_lock_try_steal` opens between renaming the dead holder's
+    pid away and writing its own new one. A plain `echo >` there would
+    clobber that contender's pid and both processes would believe they hold
+    the lock. The steal's final write must be `noclobber`-guarded, exactly
+    like `_lock_try_adopt`'s already is, and a stealer that loses this race
+    must leave the winner's pid alone -- a failed steal, not a clobber.
+
+    Deterministic, not concurrent: `cat` is overridden to inject the
+    intruding pid on its first read of the stealing claim file -- the exact
+    point between the rename and the write -- the same trick
+    test_an_adopter_refuses_a_pid_that_appears_after_its_guard above already
+    uses for the adoption path's analogous window.
+    """
+    lock_dir = tmp_path / "steal-race.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("999999", encoding="utf-8")
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _injected=0
+    cat() {{
+        case "$1" in
+            */pid.stealing.*)
+                if [ "$_injected" != 1 ]; then
+                    _injected=1
+                    echo 424242 > "{lock_dir}/pid"
+                fi
+                ;;
+        esac
+        command cat "$@"
+    }}
+    _lock_try_steal "{lock_dir}" && echo STOLE || echo REFUSED
+    """)
+    assert result.returncode == 0, result.stderr
+    assert "REFUSED" in result.stdout, (
+        f"a losing steal must not clobber the intruder's pid: {result.stdout} "
+        f"{result.stderr}"
+    )
+    assert (lock_dir / "pid").read_text().strip() == "424242", (
+        "a losing steal clobbered the pid a different contender had already "
+        "written -- the Ubuntu 26.04 shape hypothesised in #1108, where a "
+        "lying mkdir lets two processes believe they hold the same lock"
+    )
+    assert not list(lock_dir.glob("pid.stealing.*")), (
+        "a losing steal left its claim file behind, stranding litter"
+    )
+
+
+_READONLY_AFTER_MKDIR_SHIM = f"""#!/bin/sh
+{_REAL_MKDIR} "$@"
+rc=$?
+if [ $rc -eq 0 ] && [ "$1" != "-p" ]; then
+    chmod 0500 "$1" 2>/dev/null || true
+fi
+exit $rc
+"""
+
+
+def _readonly_after_mkdir_shim(tmp_path) -> Path:
+    """Install a `mkdir` that locks its own new directory read-only right
+    after creating it, so the pid write that follows fails for a reason
+    that is NOT another process winning the noclobber race (permission
+    denied, not EEXIST) -- nobody else ever writes a pid in this scenario.
+    """
+    bindir = tmp_path / "bin-readonly-after-mkdir"
+    bindir.mkdir()
+    shim = bindir / "mkdir"
+    shim.write_text(_READONLY_AFTER_MKDIR_SHIM, encoding="utf-8")
+    shim.chmod(0o755)
+    return bindir
+
+
+def test_a_non_race_pid_write_failure_does_not_strand_an_orphan_1108(tmp_path):
+    """#1108 review: a guarded pid write can fail for a reason that has
+    nothing to do with another process winning the noclobber race --
+    permission denied, a disk quota, a fork limit. If `lock_acquire` treats
+    every failed write as "someone else won" it leaves a pid-less directory
+    behind that nobody holds and nobody will ever release, blocking every
+    later acquirer until the adoption threshold (`_LOCK_ADOPT_AFTER`, 30s
+    by default) -- the exact permanent-outage shape #198 and #182 were
+    filed for, reintroduced one level up. `lock_acquire` must check whether
+    the pid now exists before falling through: if it does not, the write
+    failed for a non-race reason and the directory it just created must be
+    removed immediately rather than left as an orphan.
+    """
+    bindir = _readonly_after_mkdir_shim(tmp_path)
+    lock_dir = tmp_path / "noacc.lock"
+    result = _run(f"""
+    PATH="{bindir}:$PATH"
+    source {LIB_LOCK_SH}
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+    """)
+    assert result.returncode == 0, result.stderr
+    assert "ACQUIRED" not in result.stdout, (
+        f"acquired despite a pid write that never happened: {result.stdout} "
+        f"{result.stderr}"
+    )
+    assert not lock_dir.exists(), (
+        f"a non-race pid-write failure left a pid-less orphan directory "
+        f"behind instead of cleaning it up -- every later acquirer would "
+        f"be blocked for the adoption threshold: {result.stdout} "
         f"{result.stderr}"
     )
