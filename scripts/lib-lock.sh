@@ -255,7 +255,7 @@ _lock_read_pid_timeout() {
     # function itself just wrote via mktemp moments ago, never the
     # caller's own (possibly dataless) file -- the bound above still
     # applies to that one.
-    _LOCK_PID_READ_RESULT=$(<"$_tmp") || true
+    { _LOCK_PID_READ_RESULT=$(<"$_tmp"); } 2>/dev/null || true
     rm -f "$_tmp" 2>/dev/null || true
     return 0
 }
@@ -1005,7 +1005,7 @@ _lock_release_impl() {
     # stealer's rename-then-rewrite completed first, the content this mv
     # just carried into $_claim is the STEALER's pid, not the one this
     # function read at the top -- compare against $_pid to catch that.
-    _seen=$(<"$_claim") 2>/dev/null
+    { _seen=$(<"$_claim"); } 2>/dev/null || true
     if [ "$_seen" != "$_pid" ]; then
         # $_claim now holds whatever this mv actually captured -- the
         # stealer's own pid, since the stealer's write landed in
