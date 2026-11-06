@@ -53,7 +53,7 @@
 #
 # Functions:
 #   lock_acquire <lock_dir> [timeout_seconds]  -> 0 acquired, 1 timed out
-#   lock_release <lock_dir>                    -> 0 released, 1 not ours
+#   lock_release <lock_dir>                    -> 0 released, 1 not ours (or ownership could not be confirmed in time)
 #
 # CROSS-HOST CONTRACT (Claude Code and Codex sharing one .remember/ store on
 # one machine, #491): this primitive is safe there, deliberately, because it
@@ -76,6 +76,35 @@
 # more probable, because `kill -0` cannot see which CLI started a PID in
 # either case. See the same test file for a reproduction that documents
 # this as an accepted, general limitation rather than a fix.
+#
+# Two bounds close separate gaps in that same `kill -0` check, both landing
+# in `_lock_try_steal` (#1101, #1103):
+#
+#   - A holder can be ALIVE and still never make progress -- blocked on I/O,
+#     a wedged pipe, anything short of exiting. `kill -0` reports that
+#     holder as healthy forever. `_LOCK_MAX_HOLD_SECONDS` bounds how long
+#     any live holder may keep the lock before a later acquirer may take it
+#     over, measured from the lock directory's own mtime rather than a
+#     separate timestamp file, so acquiring a lock pays no extra cost for
+#     this to work (#1101).
+#   - The pid file itself can be UNREADABLE rather than merely absent: a
+#     dataless cloud-sync placeholder (OneDrive, iCloud -- the remote copy
+#     was deleted after the placeholder synced) blocks a plain `cat` on the
+#     read syscall rather than returning content or an error.
+#     `_lock_read_pid_timeout` bounds that read so it cannot consume a
+#     whole hook's own timeout budget. A read that does not complete in time
+#     is treated as "still held, try again later" -- a SINGLE timeout is
+#     never grounds to reclaim: it cannot tell a permanently stuck
+#     placeholder from a live holder's pid file that is merely slow to
+#     read once, and guessing wrong there would let an unrelated process
+#     steal or delete a lock a healthy holder still owns (#1103, found in
+#     this fix's own self-review). The fast timeout alone is still
+#     strictly better than the unbounded `cat` it replaces. A pid file
+#     that NEVER finishes reading is a different case, handled the same
+#     way a live-but-wedged holder already is: once the lock directory
+#     has sat untouched past `_LOCK_MAX_HOLD_SECONDS`, a later acquirer
+#     may take it over (`_lock_try_steal`'s own timed-out-read branch),
+#     a scheduler-measured follow-up to the original #1103 fix.
 
 [ -n "${_REMEMBER_LIB_LOCK_SOURCED:-}" ] && return 0
 _REMEMBER_LIB_LOCK_SOURCED=1
@@ -120,6 +149,257 @@ _lock_self_set() {
     return 0
 }
 
+# How long a live holder may keep a lock before a later acquirer may take it
+# over anyway (#1101). `kill -0` only tells "alive", never "making
+# progress"; a holder blocked on I/O is alive by that check for as long as
+# the block lasts, which on #1101 was over two days. Generous on purpose: a
+# save legitimately holds this lock across a summarize call (see the timing
+# recorder's own notes above), and a bound that fires on a healthy long save
+# is worse than one that never fires on a truly stuck one.
+_LOCK_MAX_HOLD_SECONDS="${REMEMBER_LOCK_MAX_HOLD_SECONDS:-1800}"
+
+# How long a read of the lock's pid file may block before giving up on it
+# (#1103). A plain `cat` on a dataless cloud-sync placeholder (the remote
+# copy of a file that WAS synced has since been deleted -- OneDrive,
+# iCloud) blocks the read syscall itself rather than returning content or
+# an error, observed at roughly 60s while the File Provider gives up. Left
+# unbounded, that single read consumes a whole PostToolUse hook's own
+# timeout budget.
+_LOCK_PID_READ_TIMEOUT="${REMEMBER_LOCK_PID_READ_TIMEOUT:-2}"
+# A non-integer override (`0.5`, `2s`, empty-but-set) reaches the
+# watchdog's own iteration-count arithmetic below as a bash error, which
+# exits that subshell on the spot -- before it ever sends the SIGTERM
+# that is this whole bound's only way of waking a blocked `cat` --
+# leaving the read, and the caller's blocking `wait` on it, unbounded
+# again: exactly the #1103 hang this file exists to close, just
+# reopened by a bad env var. Reject anything that is not digits-only
+# and fall back to the documented default instead of letting a typo
+# silently undo the bound. (Deliberately not spelling out the literal
+# watchdog arithmetic here, with its own guarded variable name, between
+# the dollar-double-open-paren and matching double-close-paren bash
+# arithmetic delimiters: tests/test_arith_base_lint_332.py's own sweep
+# is plain text, not a shell parser, and does not skip comment lines --
+# it flagged exactly that literal span the first time this comment
+# spelled the delimiters out.)
+#
+# `0` (or `00`) is digits-only but still rejected, separately: it sets
+# the watchdog's own bound to zero iterations, which kills a read that
+# is not yet done after the FIRST poll-sleep interval (~50ms) --
+# indistinguishable, under any real load, from killing a holder that
+# was about to finish normally. Worse, the SAME bound of zero applies
+# to the takeover path's post-rename re-read (above): a legitimate
+# fresh pid write can lose that race to its own zero-length grace
+# period, reporting a false timeout that lets a second contender treat
+# the just-written winner as still-stuck and take the lock away from
+# it -- two processes then believe they hold the same lock. `-lt 1`
+# (not `-le 0`) is the natural phrasing of "require at least one real
+# iteration"; `[ ]`'s own numeric comparison does not apply octal
+# rules (confirmed: a leading-zero value compares correctly here, only
+# the ARITHMETIC context below needs the `10#` forcing applied there).
+if [[ "$_LOCK_PID_READ_TIMEOUT" == *[!0-9]* ]] ||
+    [ -z "$_LOCK_PID_READ_TIMEOUT" ] ||
+    [ "$_LOCK_PID_READ_TIMEOUT" -lt 1 ]; then
+    _LOCK_PID_READ_TIMEOUT=2
+fi
+
+# Read <pid-file> into $_LOCK_PID_READ_RESULT, bounded by
+# _LOCK_PID_READ_TIMEOUT seconds. Returns 0 once the read completes --
+# including an empty result, which is a legitimate "not written yet" state
+# and is reported as empty, not as an error. Returns 1 if the read did not
+# complete within the budget.
+#
+# Not `timeout cat ...`: `timeout` is a GNU coreutils binary, absent from
+# macOS's base install -- the platform #1103 was filed from, and the same
+# reason this file does not depend on `flock` (see the top of the file).
+# Backgrounding the read and polling with `kill -0` needs nothing beyond
+# what this file already uses elsewhere.
+#
+# A SIGTERM to a process blocked in a slow read() interrupts the syscall and
+# ends the process (no handler is installed for it), which is what actually
+# unblocks the background job here -- not a cooperative check the blocked
+# `cat` could ever perform itself. This covers the dataless-placeholder
+# case #1103 was filed for (a File Provider read that blocks for ~60s,
+# then gives up) and a reader that ignores SIGTERM but can still be
+# reached by SIGKILL. It does NOT cover a read truly stuck in an
+# UNINTERRUPTIBLE kernel sleep (D state -- a wedged NFS mount, a broken
+# FUSE driver): no signal, including SIGKILL, is delivered to a process
+# until that syscall itself returns, which is a kernel-level condition no
+# userspace watchdog can force. `wait "$_cat_pid"` below has no bound of
+# its own for exactly that reason, and would block for as long as the
+# read does -- rare enough on a local pid file that this file does not
+# attempt to work around it (reasoned, not reproduced: inducing a real D
+# state needs a wedged filesystem, which this test suite cannot
+# construct), same as every caller already accepted before #1101/#1103.
+_lock_read_pid_timeout() {
+    local _file="$1" _tmp _cat_pid _watchdog_pid _rc _max_iters _iters=0
+    _LOCK_PID_READ_RESULT=""
+    _tmp=$(mktemp "${TMPDIR:-/tmp}/remember-pidread-XXXXXX" 2>/dev/null) || {
+        # No scratch file to redirect into, so there is nowhere to background
+        # the read INTO -- this function's own timeout mechanism cannot help
+        # here regardless of what this branch does. A second-review finding
+        # corrected an earlier instinct to `return 1` unconditionally on this
+        # branch: `mktemp` fails for ordinary reasons that have nothing to do
+        # with #1103's cloud-sync placeholders -- a full or unwritable
+        # TMPDIR, no free inodes -- and refusing unconditionally here made
+        # EVERY caller of _lock_try_steal and _lock_release_impl refuse
+        # unconditionally too, including a release of a lock the process
+        # legitimately owns. That is a total, systemic lock outage, strictly
+        # worse than the narrow, rare hang this whole fix exists to bound.
+        # Falling back to a direct, unbounded `cat` degrades this one corner
+        # to exactly the behaviour every caller already had before #1103 --
+        # not worse, and bounded everywhere `mktemp` still works.
+        _LOCK_PID_READ_RESULT=$(cat "$_file" 2>/dev/null) || true
+        return 0
+    }
+    ( cat "$_file" > "$_tmp" 2>/dev/null ) </dev/null &
+    _cat_pid=$!
+    # Scheduler-measured follow-up finding: an ITERATION-COUNT poll loop
+    # run on the MAIN THREAD (the shape this replaced) cannot avoid paying
+    # at least one full $_LOCK_SLEEP interval even on the common, fast,
+    # uncontended path, because `kill -0` on a backgrounded job that
+    # already exited but has not yet been `wait`-ed on still reports it
+    # alive -- the process stays a zombie in the table until something
+    # reaps it, and a loop that checks `kill -0` BEFORE ever calling
+    # `wait` therefore always sleeps at least once. Measured at ~60-80ms
+    # added per lock_release on macOS, against ~25ms on main with no
+    # bound at all -- a regression a fork-count fix alone (finding 4,
+    # removing the second `cat`) never touched, because the forced sleep
+    # was never a fork.
+    #
+    # The fix: a SEPARATE backgrounded watchdog owns the timeout entirely,
+    # so the main thread does nothing but a single blocking `wait` on the
+    # reader -- which returns the INSTANT the reader actually exits, no
+    # polling granularity on the main thread at all.
+    #
+    # The watchdog's OWN loop still polls, deliberately -- a second-review
+    # finding on the first cut of this fix, which had the watchdog `sleep
+    # "$_LOCK_PID_READ_TIMEOUT"` in one blocking call: SIGTERM to a shell
+    # blocked in wait() for its own foreground child (that long `sleep`)
+    # kills the shell, not the child, which is then orphaned and keeps
+    # running for the REST of the full timeout (reproduced directly: a
+    # fresh `sleep 2` still alive in `ps`, reparented to pid 1, right
+    # after the fast/uncontended path returned) -- a real, if narrow,
+    # resource cost nothing in the first cut accounted for, on literally
+    # every call. Polling in small `$_LOCK_SLEEP` steps instead means the
+    # watchdog notices the reader is gone (including via the SAME
+    # zombie-until-reaped mechanism the main thread no longer has to wait
+    # out) within about one poll interval of the main thread's own `wait`
+    # reaping it, and simply exits its own loop -- no kill, no orphan, no
+    # lingering process past that single short interval.
+    (
+        if [ "$_LOCK_SLEEP" = 1 ]; then
+            _max_iters="$_LOCK_PID_READ_TIMEOUT"
+        else
+            # 10# forces base 10 -- a value like "08" is digits-only (the
+            # validation above lets it through) but an invalid OCTAL
+            # literal once bash's arithmetic context sees the leading
+            # zero, which is the same "exits before ever sending SIGTERM"
+            # failure as the non-digit case above, just one validation
+            # layer deeper (10#$_mtime below uses the same guard for the
+            # same reason).
+            _max_iters=$(( 10#$_LOCK_PID_READ_TIMEOUT * 20 ))
+        fi
+        # A `while kill -0 ...; do sleep; done` shape -- check first, sleep
+        # only if still alive -- makes the fast-path sleep-fork count
+        # RANDOM rather than zero or fixed: whether `$_cat_pid` already
+        # looks gone on the very first check depends on whether this
+        # watchdog or the main thread's own `wait` gets scheduled first,
+        # a race with no winner either side can force. A repo-wide
+        # fork-count test elsewhere (test_lock_timing.py, unrelated to
+        # this function, comparing a DIFFERENT feature's own marginal
+        # forks) went flaky from exactly this -- ~13% of runs, confirmed
+        # by direct repetition -- once this watchdog's own variable
+        # sleep count became noise riding on top of that comparison.
+        # Sleeping ONCE unconditionally before the first check fixes the
+        # fast-path cost at exactly one sleep fork, every time, which is
+        # what the ORIGINAL (reverted) single-sleep design already had by
+        # construction -- deterministic was never the problem with that
+        # design, only the orphan risk was.
+        while :; do
+            sleep "$_LOCK_SLEEP"
+            _iters=$(( _iters + 1 ))
+            kill -0 "$_cat_pid" 2>/dev/null || break
+            if [ "$_iters" -ge "$_max_iters" ]; then
+                kill "$_cat_pid" 2>/dev/null || true
+                # Same SIGTERM-then-SIGKILL escalation the original fix
+                # had: a reader that ignores SIGTERM (reproduced directly
+                # with a shim that traps and ignores TERM) is reached by
+                # SIGKILL instead. A reader truly stuck in an
+                # UNINTERRUPTIBLE kernel read is a different case this
+                # escalation cannot reach either way -- no signal lands
+                # on it until the syscall itself returns -- but this
+                # watchdog's OWN poll loop still returns on schedule
+                # regardless, since `kill` never blocks on its target;
+                # only the main thread's later `wait "$_cat_pid"` would
+                # still be stuck on such a reader, see the note above
+                # this function.
+                sleep "$_LOCK_SLEEP"
+                kill -0 "$_cat_pid" 2>/dev/null && kill -9 "$_cat_pid" 2>/dev/null
+                break
+            fi
+        done
+    # `</dev/null >/dev/null 2>&1` here is still load-bearing: even
+    # bounded to one short poll interval past the main thread's own
+    # `wait`, the watchdog is still a process this function's caller did
+    # not ask for, and if whatever called this function is itself
+    # captured through a pipe (a hook runner, a test harness), an
+    # unredirected child inheriting that pipe's write end would delay
+    # the caller seeing EOF until this one also exits -- not the ~2s a
+    # single long `sleep` could cost, but still a real, avoidable delay
+    # for zero benefit, and the ~100ms/pair regression a missing
+    # redirection on the ORIGINAL (single-long-sleep) design measured
+    # directly is the same class of cost this closes off entirely.
+    ) </dev/null >/dev/null 2>&1 &
+    _watchdog_pid=$!
+    # `disown` here, not left to the shell's own job table: a signal-killed
+    # background job that is STILL in the job table gets an unconditional
+    # "Terminated: 15" line on this shell's own stderr the next time it
+    # notices (observed on EVERY call, both the common fast path -- where
+    # the kill below fires on a watchdog that is still asleep -- and the
+    # #1103 timeout/escalation path, where the watchdog is what gets
+    # raced by the very kill meant to stop it promptly). This is bash's
+    # own async job-control notification, not something `2>/dev/null` on
+    # the kill or the surrounding subshell's own redirections can reach,
+    # because it is printed by THIS shell's bookkeeping, not by the job
+    # being signalled. `disown` removes the watchdog from that bookkeeping
+    # the moment its pid is known -- before anything could ever kill it --
+    # which silences the notification unconditionally, on every bash this
+    # function runs under (including bash 3.2), with no change to timing:
+    # this function never `wait`s on the watchdog, so losing the ability
+    # to read ITS exit status (what `disown` costs here) costs nothing.
+    disown "$_watchdog_pid" 2>/dev/null || true
+    wait "$_cat_pid" 2>/dev/null
+    _rc=$?
+    # The watchdog is done being useful the instant `wait` above returns,
+    # whether because the reader finished naturally or because the
+    # watchdog itself just killed it -- killing it here either stops it
+    # before it ever sleeps (the common, fast case) or is a harmless no-op
+    # on a process already gone. Deliberately not waited on afterward, the
+    # same narrow, accepted zombie-entry tradeoff the reader's own kill
+    # already makes elsewhere in this function: it must still return on
+    # schedule rather than pay to reap a process that costs nothing
+    # further to leave unreaped.
+    kill "$_watchdog_pid" 2>/dev/null || true
+    # A process killed by a signal reports 128+signal from `wait` -- the
+    # one portable way to tell "the watchdog had to intervene" from "the
+    # reader exited on its own, however it felt about its own exit code"
+    # without any state shared between the two subshells.
+    if [ "$_rc" -ge 128 ]; then
+        rm -f "$_tmp" 2>/dev/null || true
+        return 1
+    fi
+    # $(<file) is a bash builtin read, not a forked `cat` -- one fewer
+    # process on every single call to this function, fast path included
+    # (self-review follow-up to #1101/#1103, finding 4). Safe here
+    # specifically because $_tmp is always a local scratch file this
+    # function itself just wrote via mktemp moments ago, never the
+    # caller's own (possibly dataless) file -- the bound above still
+    # applies to that one.
+    { _LOCK_PID_READ_RESULT=$(<"$_tmp"); } 2>/dev/null || true
+    rm -f "$_tmp" 2>/dev/null || true
+    return 0
+}
+
 # Take a stale lock away from a dead holder. Returns 0 only for the single
 # process that won the rename — everyone else gets 1 and keeps waiting.
 _lock_try_steal() {
@@ -155,12 +435,116 @@ _lock_try_steal() {
         done
     fi
 
-    _pid=$(cat "${_dir}/pid" 2>/dev/null) || true
+    if _lock_read_pid_timeout "${_dir}/pid"; then
+        _pid="$_LOCK_PID_READ_RESULT"
+    else
+        # Did not complete within _LOCK_PID_READ_TIMEOUT -- a dataless
+        # cloud-sync placeholder blocks the read rather than returning
+        # content (#1103), but a read that is merely slow ONCE looks
+        # identical from here, and a live, healthy holder's pid file can be
+        # slow to read for reasons that have nothing to do with how long the
+        # lock itself has been held. Guessing "debris" from a single timeout
+        # risks stealing a lock out from under a holder that is making
+        # normal progress -- found in self-review (#1101/#1103): treating
+        # this the same as a genuinely-empty-and-old pid let two processes
+        # both believe they held the same lock whenever BOTH this read and
+        # the post-rename re-check below happened to time out the same way.
+        # Refuse and let the caller retry rather than steal on a guess; the
+        # fast timeout alone is still strictly better than the unbounded
+        # `cat` this replaces, which could block an entire hook's budget.
+        #
+        # Refusing FOREVER, however, is its own outage: a pid file that
+        # NEVER finishes reading (the actual #1103 shape -- a dataless
+        # placeholder whose remote copy is gone for good, not merely a
+        # holder that was slow once) would make every later acquirer time
+        # out at this exact point, forever, with "another save holds the
+        # lock, skipping" logged after 2s instead of ~60s but just as
+        # permanently (scheduler-measured follow-up: #1103 was faster,
+        # not fixed). The SAME age bound that already lets a later
+        # acquirer take over a live-but-wedged holder (`kill -0` succeeds
+        # forever, below) applies here too: once the lock directory
+        # itself has sat untouched for at least _LOCK_MAX_HOLD_SECONDS
+        # AND the pid file still refuses to finish reading, treat it the
+        # same as a wedged live holder and take it over.
+        #
+        # Deliberately NEVER re-reads the ORIGINAL "${_dir}/pid" to get
+        # here -- it already timed out once above and would time out
+        # again, paying the same bound for nothing. The atomic `mv`
+        # ALONE is not the whole single-winner guarantee here, though:
+        # unlike the two branches below (which read real content and
+        # re-check THAT survived the rename), this branch has no content
+        # to compare against, and self-review on this exact fix found a
+        # real race from skipping the check anyway -- a winner's own
+        # write recreates "${_dir}/pid" an instant after the rename, and
+        # a slower contender's `mv` can then grab that brand-new, healthy
+        # pid file with nothing yet telling it apart from the stuck
+        # placeholder it meant to steal (reproduced directly: 7 of 8
+        # concurrent contenders believed they won). The re-read below,
+        # of the CLAIM this rename just produced -- never the original
+        # path again -- is what actually closes that gap: see the
+        # comment right after the `mv`. Removing it reopens the race.
+        [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_MAX_HOLD_SECONDS" ] || return 1
+        mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
+        # Confirmed by direct repro (N=8 concurrent contenders) that
+        # skipping this check lets 7 of 8 believe they won: this winner's
+        # own noclobber write below RECREATES "${_dir}/pid", and a slower
+        # contender's `mv` (racing on the SAME path, not the content) can
+        # then grab that brand-new, perfectly healthy pid file an instant
+        # after it was written, with nothing yet telling it apart from
+        # the stuck placeholder it meant to grab. Re-reading from the
+        # CLAIM this rename just produced -- never the original path
+        # again -- tells the two apart cheaply: a genuine stuck FIFO
+        # (rename preserves the underlying special file, not the
+        # content) still times out identically; a fresh pid some faster
+        # winner already wrote resolves immediately, which is this
+        # contender's signal that it grabbed someone else's win by
+        # mistake and must hand it back rather than overwrite it.
+        if _lock_read_pid_timeout "$_claim"; then
+            mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+            return 1
+        fi
+        if ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null; then
+            rm -f "$_claim" 2>/dev/null || true
+            return 0
+        fi
+        rm -f "$_claim" 2>/dev/null || true
+        return 1
+    fi
 
-    # No pid file yet: the holder created the directory microseconds ago and has
-    # not written it. That is a live lock mid-acquisition, not a stale one.
-    [ -n "$_pid" ] && [[ "$_pid" != *[!0-9]* ]] || return 1
-    kill -0 "$_pid" 2>/dev/null && return 1
+    # Confirmed empty or non-numeric -- the read genuinely completed, so this
+    # is a fact rather than a guess, unlike the timeout case above. Two
+    # different things can cause it: the holder created the directory
+    # microseconds ago and has not written its pid yet (a live acquisition
+    # in flight), or the holder died between `mkdir` and writing its pid,
+    # leaving a pid file that exists and is empty forever (a second-review
+    # finding: `_lock_try_adopt` below only ever reclaims a MISSING pid
+    # file -- its very first line is `[ -e "${_dir}/pid" ] && return 1` --
+    # so a pid file that exists-but-is-empty has no other reclaim path at
+    # all). Age is what tells the two apart, same as the no-pid-file case
+    # `_lock_try_adopt` already covers; because the content was genuinely
+    # read, age-gating it here carries none of the ambiguity a timeout
+    # would.
+    if [ -z "$_pid" ] || [[ "$_pid" == *[!0-9]* ]]; then
+        [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_ADOPT_AFTER" ] || return 1
+        # $_pid is left exactly as read -- NOT cleared to "" here. The
+        # post-rename re-read below (`_seen != $_pid`) exists to confirm
+        # nothing changed underneath the rename, by comparing against
+        # whatever this branch actually saw. Clearing a non-numeric $_pid to
+        # "" broke exactly that: the re-read then saw the real content again
+        # (e.g. "abc"), compared it against the empty string it could never
+        # equal, and the steal was restored and refused every time -- a
+        # non-numeric pid file could never be reclaimed, however old
+        # (confirmed by reproduction, not merely reasoned).
+    # Alive is not the same as healthy: a holder that hangs forever --
+    # blocked on I/O, a wedged pipe -- is live by `kill -0` indefinitely
+    # (#1101). Bound how long ANY live holder may keep the lock before a
+    # later acquirer may take it over. The directory's mtime is set when it
+    # is created and again, microseconds later, when the pid is written, so
+    # its age already tracks the lock's own hold duration -- no separate
+    # timestamp file, no extra cost on the common acquire path.
+    elif kill -0 "$_pid" 2>/dev/null; then
+        [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_MAX_HOLD_SECONDS" ] || return 1
+    fi
 
     # Claim the right to take over by RENAMING the pid file. Rename is atomic
     # and the source disappears, so of the N processes that judged this lock
@@ -175,7 +559,15 @@ _lock_try_steal() {
     # closes that window because the path is never empty.
     mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
 
-    _seen=$(cat "$_claim" 2>/dev/null) || true
+    # A timed-out re-read here must restore and refuse, exactly like a
+    # mismatch below -- never fall through as though it had matched. Letting
+    # "could not confirm" and "confirmed identical" collapse into the same
+    # branch is precisely the self-review finding above, one line later.
+    if ! _lock_read_pid_timeout "$_claim"; then
+        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        return 1
+    fi
+    _seen="$_LOCK_PID_READ_RESULT"
     if [ "$_seen" != "$_pid" ]; then
         mv "$_claim" "${_dir}/pid" 2>/dev/null || true
         return 1
@@ -758,13 +1150,93 @@ lock_release() {
 }
 
 _lock_release_impl() {
-    local _dir="$1" _pid
-    _pid=$(cat "${_dir}/pid" 2>/dev/null) || true
+    local _dir="$1" _pid _claim _seen
+    if _lock_read_pid_timeout "${_dir}/pid"; then
+        _pid="$_LOCK_PID_READ_RESULT"
+    else
+        # Same dataless-placeholder hazard as the read in _lock_try_steal
+        # (#1103) -- bounded rather than left to block the release path too.
+        # UNLIKE _lock_try_steal, this function's caller believes IT holds
+        # the lock: an inconclusive read must never fall through to removing
+        # a directory that might belong to someone else. A first cut here
+        # treated a timeout the same as a genuinely empty pid (which skips
+        # the ownership check below and removes unconditionally) -- found in
+        # self-review to let a process whose own read was merely slow once
+        # delete a live, unrelated holder's lock. Refuse rather than guess.
+        return 1
+    fi
 
     _lock_self_set
     if [ -n "$_pid" ] && [ "$_pid" != "$_LOCK_SELF" ]; then
         return 1
     fi
+
+    # The read above and the `rm -rf` below are two separate operations, and
+    # a steal can land in between: a holder judged stale (> _LOCK_MAX_HOLD_
+    # SECONDS, #1101) while it is ALIVE and about to release legitimately
+    # races a stealer that renames the pid file, re-reads it, and writes its
+    # own pid -- all while this release is still only holding the pid VALUE
+    # it read earlier, not the file itself. Nothing stopped the `rm -rf`
+    # below from firing after that takeover completed, deleting the new
+    # owner's lock out from under it; a third process then recreates the
+    # directory and two holders exist. Closed the same way `_lock_try_steal`
+    # already closes its own single-winner race: rename the pid file OUT
+    # from under the directory first. Whichever of this release's rename or
+    # a concurrent steal's rename happens first wins; the other gets ENOENT
+    # (or a content mismatch on re-read) and backs off instead of
+    # proceeding on stale information.
+    # A known, accepted gap (review finding, left undone like the PID-
+    # recycling limitation documented at the top of this file rather than
+    # chased further): if THIS process is killed between the mv below and
+    # this function's own cleanup, the resulting pid.releasing.$_LOCK_SELF
+    # is stranded with a dead owner. _lock_try_steal reclaims an abandoned
+    # pid.stealing.* claim exactly this way; nothing here does the same for
+    # pid.releasing.* yet, so a crashed release can leave one stray file
+    # per occurrence. It does not wedge the lock -- _lock_try_adopt still
+    # reclaims the lock itself once the pid file is absent and the
+    # directory is old enough -- it only litters, narrowly and rarely.
+    _claim="${_dir}/pid.releasing.${_LOCK_SELF}"
+    if ! mv "${_dir}/pid" "$_claim" 2>/dev/null; then
+        return 1
+    fi
+    # Two different takeovers can land in this window, and each needs a
+    # different check -- a second-review finding on the first cut of this
+    # fix, which only had the first of the two below and broke the very
+    # steal-vs-release test it was meant to pin, because the two checks
+    # catch opposite timings, not the same one twice.
+    #
+    # A STEALER rewrites "${_dir}/pid" BEFORE this mv has a chance to run:
+    # whichever of this release's mv or the stealer's own mv of
+    # "${_dir}/pid" is issued first still wins the PATH, but if the
+    # stealer's rename-then-rewrite completed first, the content this mv
+    # just carried into $_claim is the STEALER's pid, not the one this
+    # function read at the top -- compare against $_pid to catch that.
+    { _seen=$(<"$_claim"); } 2>/dev/null || true
+    if [ "$_seen" != "$_pid" ]; then
+        # $_claim now holds whatever this mv actually captured -- the
+        # stealer's own pid, since the stealer's write landed in
+        # "${_dir}/pid" before this mv ran. "${_dir}/pid" is absent right
+        # now (this mv just took the only thing that was there), so
+        # restoring $_claim's real content is what puts the new owner's
+        # pid back where it belongs -- never our own stale belief, which
+        # is why this restores $_claim unmodified rather than writing
+        # $_pid.
+        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        return 1
+    fi
+    # An ADOPTER creates a BRAND NEW "${_dir}/pid" AFTER this mv, from
+    # nothing: _lock_try_adopt fires whenever "${_dir}/pid" is ABSENT and
+    # the directory is old enough, both true for the whole window this mv
+    # just opened (a stale-but-alive holder's age already exceeds the
+    # adopt threshold in any sane configuration). A content compare can
+    # never see this -- nothing we hold changes when someone else creates
+    # a different file -- so check existence instead: if it exists again,
+    # someone else's pid is there now, and it is theirs to keep.
+    if [ -e "${_dir}/pid" ]; then
+        rm -f "$_claim" 2>/dev/null || true
+        return 1
+    fi
+    rm -f "$_claim" 2>/dev/null || true
     rm -rf "$_dir" 2>/dev/null || true
     return 0
 }

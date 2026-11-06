@@ -30,6 +30,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -486,6 +487,798 @@ def test_a_fresh_pidless_lock_is_not_adopted(tmp_path):
     """)
     assert "REFUSED" in result.stdout, (
         f"adopted a lock a holder had just created: {result.stdout} {result.stderr}"
+    )
+
+
+def test_a_live_but_permanently_hung_holder_is_eventually_stolen_from(tmp_path):
+    """#1101: a holder that is alive but makes no progress at all (blocked
+    on I/O, a wedged pipe) is live by `kill -0` for as long as it blocks --
+    observed on #1101 as over two days. Once the lock directory's own age
+    exceeds _LOCK_MAX_HOLD_SECONDS, a later acquirer must be able to take it
+    over anyway, regardless of liveness."""
+    lock_dir = tmp_path / "hung.lock"
+    lock_dir.mkdir()
+    holder = subprocess.Popen(["sleep", "30"])
+    try:
+        (lock_dir / "pid").write_text(str(holder.pid), encoding="utf-8")
+        # Back-date the directory so it reads as held well past the bound,
+        # without the test actually waiting that long.
+        old_time = time.time() - 120
+        os.utime(lock_dir, (old_time, old_time))
+
+        result = _run(f"""
+        source {LIB_LOCK_SH}
+        _LOCK_MAX_HOLD_SECONDS=60
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """)
+        assert "ACQUIRED" in result.stdout, (
+            f"a live-but-hung holder older than the hold bound must be "
+            f"reclaimable: {result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_a_live_holder_within_the_hold_bound_is_not_stolen_from(tmp_path):
+    """Positive control for the test above: a live holder younger than
+    _LOCK_MAX_HOLD_SECONDS must still be refused, or the bound would not be
+    doing anything -- every live holder would simply be stealable."""
+    lock_dir = tmp_path / "fresh-live.lock"
+    lock_dir.mkdir()
+    holder = subprocess.Popen(["sleep", "5"])
+    try:
+        (lock_dir / "pid").write_text(str(holder.pid), encoding="utf-8")
+
+        result = _run(f"""
+        source {LIB_LOCK_SH}
+        _LOCK_MAX_HOLD_SECONDS=3600
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """)
+        assert "REFUSED" in result.stdout, (
+            f"a live holder well within the hold bound must not be stolen "
+            f"from: {result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_an_unreadable_pid_file_is_refused_quickly_rather_than_hanging(
+    tmp_path,
+):
+    """#1103: a dataless cloud-sync placeholder pid file blocks a plain `cat`
+    on the read syscall rather than returning content or an error (observed
+    at ~60s). Simulated here with a FIFO that has no writer, which blocks a
+    `cat` exactly the same way without depending on an actual sync client.
+
+    A timed-out read must NEVER be treated as grounds to steal the lock, no
+    matter how old the lock directory is -- found in this fix's own
+    self-review: a single timeout cannot tell a permanently stuck
+    placeholder from a live holder's pid file that is merely slow to read
+    once, and reclaiming on that guess let two processes believe they held
+    the same lock whenever both the first read and the post-rename re-check
+    happened to time out the same way. The fix this test pins is narrower
+    than a first cut attempted: REFUSED, quickly, every time -- never
+    ACQUIRED -- and the whole call must return well inside this test's own
+    subprocess timeout, proving the read did not hang either."""
+    lock_dir = tmp_path / "dataless.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+    old_time = time.time() - 120
+    os.utime(lock_dir, (old_time, old_time))
+
+    result = _run(
+        f"""
+        source {LIB_LOCK_SH}
+        _LOCK_PID_READ_TIMEOUT=1
+        _LOCK_ADOPT_AFTER=60
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """,
+        timeout=20,
+    )
+    assert "REFUSED" in result.stdout, (
+        f"an unreadable pid file must never be reclaimed, however old the "
+        f"lock directory is -- a timeout is not proof the holder is dead: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert (lock_dir / "pid").exists(), (
+        "a refused steal must leave the original pid file in place"
+    )
+
+
+def test_a_permanently_dataless_pid_file_becomes_acquirable_once_old_enough(
+    tmp_path,
+):
+    """Scheduler finding: the test above pins that a SINGLE timed-out read
+    must never be grounds to steal -- correct, since one timeout cannot
+    tell a merely-slow read from a permanently broken one. But refusing
+    EVERY read forever, with no recovery path at all, means a pid file
+    that genuinely never finishes reading (the actual #1103 shape -- a
+    dataless cloud-sync placeholder whose remote copy is gone for good)
+    makes `_lock_try_steal` refuse FOREVER: every later `lock_acquire`
+    times out at this exact point and logs "another save holds the lock,
+    skipping" permanently, just after 2s instead of ~60s (#1103 was made
+    faster, not fixed). This pins the recovery path: once the lock
+    directory is at least as old as `_LOCK_MAX_HOLD_SECONDS` AND the pid
+    file still refuses to finish reading, a later acquirer takes it over.
+    `REMEMBER_LOCK_MAX_HOLD_SECONDS=0` makes any real age qualify, the
+    same trick `test_a_live_but_permanently_hung_holder_is_eventually_
+    stolen_from` above already uses for the live-holder case.
+    """
+    lock_dir = tmp_path / "dataless-recoverable.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+    result = _run(
+        f"""
+        export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
+        export REMEMBER_LOCK_PID_READ_TIMEOUT=1
+        source {LIB_LOCK_SH}
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """,
+        timeout=15,
+    )
+    assert "ACQUIRED" in result.stdout, (
+        f"a permanently dataless pid file old enough to exceed "
+        f"_LOCK_MAX_HOLD_SECONDS must eventually become acquirable -- "
+        f"a timeout is not forever proof the holder is alive: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    new_pid = (lock_dir / "pid").read_text(encoding="utf-8").strip()
+    assert new_pid.isdigit(), (
+        f"the takeover must leave a real, numeric pid behind, not the "
+        f"FIFO or something else: {new_pid!r}"
+    )
+
+
+def test_concurrent_takeover_of_a_permanently_dataless_pid_file_has_one_winner(
+    tmp_path,
+):
+    """Safety counterpart to the test above: of N contenders that all see
+    the same permanently-stuck, old-enough pid file at once, exactly one
+    may win the takeover -- the same single-winner guarantee
+    `test_stale_takeover_has_exactly_one_winner` already pins for the
+    confirmed-dead-holder case, now exercised for the never-finishes-
+    reading case this issue adds.
+
+    The atomic `mv` of the pid file alone is NOT the whole guarantee
+    here, found by this exact test during development: a winner's own
+    pid write recreates the path an instant after its `mv`, and a
+    slower contender's `mv` can then grab that brand-new, healthy pid
+    file with nothing yet telling it apart from the stuck placeholder
+    it meant to steal -- reproduced directly as 7 of 8 contenders
+    "winning" before the fix. `_lock_try_steal` closes that by
+    re-reading the CLAIM the rename just produced (never the original
+    path again, since the original genuinely never finishes reading):
+    a real placeholder still times out identically on that re-read; a
+    fresh pid a faster winner already wrote resolves immediately, the
+    signal to restore it and refuse. This test is what the single-mv
+    comment next to that re-read in lib-lock.sh points back to.
+    """
+    lock_dir = tmp_path / "dataless-race.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+    events_file = tmp_path / "events.log"
+    n = 8
+    result = _run(
+        f"""
+        export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
+        export REMEMBER_LOCK_PID_READ_TIMEOUT=1
+        source {LIB_LOCK_SH}
+        contend() {{
+            if _lock_try_steal "{lock_dir}"; then
+                echo "STOLE $1" >> "{events_file}"
+            else
+                echo "REFUSED $1" >> "{events_file}"
+            fi
+        }}
+        for i in $(seq 1 {n}); do
+            contend "$i" &
+        done
+        wait
+        """,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = events_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == n, (
+        f"expected exactly {n} outcomes, one per contender: {lines!r}"
+    )
+    wins = [line for line in lines if line.startswith("STOLE")]
+    assert len(wins) == 1, (
+        f"exactly one of {n} concurrent takeovers of the same stuck pid "
+        f"file must win -- got {len(wins)}: {lines!r}"
+    )
+    new_pid = (lock_dir / "pid").read_text(encoding="utf-8").strip()
+    assert new_pid.isdigit(), (
+        f"after the race, the pid file must hold a real numeric pid, "
+        f"not be left empty or dataless: {new_pid!r}"
+    )
+
+
+def test_a_non_integer_pid_read_timeout_still_bounds_the_read(tmp_path):
+    """Scheduler finding: `REMEMBER_LOCK_PID_READ_TIMEOUT=0.5` (or `2s`, or
+    any value with a non-digit character) reaches `_max_iters=$((
+    _LOCK_PID_READ_TIMEOUT * 20 ))` in the watchdog as a bash arithmetic
+    error, which exits that subshell immediately -- before it ever sends
+    the SIGTERM that is this whole bound's only way of waking a blocked
+    `cat` on a dataless pid file. The read, and the caller's blocking
+    `wait` on it, becomes unbounded again: the exact #1103 hang this file
+    exists to close, reopened by a single bad env var. Confirmed by direct
+    repro before writing this test: both bash 3.2 and a newer bash hang
+    past 15s on the pre-fix code for this exact FIFO. A digits-only
+    validation with a fallback to the documented default (2) closes it.
+    """
+    lock_dir = tmp_path / "badtimeout.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+    result = _run(
+        f"""
+        export REMEMBER_LOCK_PID_READ_TIMEOUT=0.5
+        source {LIB_LOCK_SH}
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        echo RESOLVED=$_LOCK_PID_READ_TIMEOUT
+        """,
+        timeout=15,
+    )
+    assert "REFUSED" in result.stdout, (
+        f"a non-integer timeout override must still refuse (bounded) "
+        f"rather than hang: {result.stdout!r} {result.stderr!r}"
+    )
+    assert "RESOLVED=2" in result.stdout, (
+        f"a non-digit override must fall back to the documented default "
+        f"of 2, not silently keep the bad value: {result.stdout!r}"
+    )
+
+
+def test_a_leading_zero_pid_read_timeout_is_read_as_decimal_not_octal(
+    tmp_path,
+):
+    """A sibling trap to the test above: `"08"` is digits-only (passes the
+    validation that test pins) but is an INVALID octal literal once bash's
+    `$(( ))` arithmetic context sees the leading zero -- the same
+    "arithmetic error exits before ever sending SIGTERM" failure, one
+    validation layer deeper. `10#$_LOCK_PID_READ_TIMEOUT` forces base 10
+    at the one place this value is used in arithmetic, matching the
+    `10#$_mtime` convention `_lock_dir_age` already uses for the same
+    reason. Confirmed by direct repro that this specific value (not `0.5`
+    or `2s`, both already covered above) hangs without that forcing --
+    unlike `01` through `07`, `08` and `09` are not valid octal digits at
+    all, so this is the smallest leading-zero value that actually
+    diverges between "read as decimal" (8) and "rejected by bash's own
+    arithmetic as an invalid base-8 literal" (a hard error, not merely a
+    different number) -- an earlier draft of this test used `03`, which
+    happens to read the same both ways and silently tested nothing.
+    """
+    lock_dir = tmp_path / "octaltimeout.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+    result = _run(
+        f"""
+        export REMEMBER_LOCK_PID_READ_TIMEOUT=08
+        source {LIB_LOCK_SH}
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """,
+        # 08 resolves to an 8-second read bound, and an acquire can pay it
+        # more than once; 15s left no headroom on a loaded macOS runner.
+        # The hang this pins is unbounded, so 40s still tells them apart.
+        timeout=40,
+    )
+    assert "REFUSED" in result.stdout, (
+        f"a leading-zero timeout value must still refuse (bounded), not "
+        f"hang on an invalid-octal arithmetic error: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+
+
+def test_a_zero_pid_read_timeout_falls_back_to_the_default():
+    """Scheduler finding: `0` (and `00`) is digits-only, so the validation
+    the two tests above pin lets it through -- but it sets the watchdog's
+    own bound to zero iterations, which kills a read not yet done after
+    the FIRST poll-sleep (~50ms), indistinguishable from killing a
+    holder that was about to finish normally. Worse, the SAME zero bound
+    applies to the takeover path's post-rename re-read: a legitimate
+    fresh pid write can lose that race to its own zero-length grace
+    period, which is a false-timeout report that lets a second
+    concurrent contender treat the just-written winner as still stuck
+    and take the lock away from it -- two processes then believe they
+    hold the same lock. `0`/`00` must fall back to the documented
+    default (2) the same as a non-digit value does.
+    """
+    for bad_value in ("0", "00"):
+        result = _run(
+            f"""
+            export REMEMBER_LOCK_PID_READ_TIMEOUT={bad_value}
+            source {LIB_LOCK_SH}
+            echo RESOLVED=$_LOCK_PID_READ_TIMEOUT
+            """,
+            timeout=10,
+        )
+        assert "RESOLVED=2" in result.stdout, (
+            f"REMEMBER_LOCK_PID_READ_TIMEOUT={bad_value!r} must fall back "
+            f"to the default of 2, not keep a zero bound: "
+            f"{result.stdout!r} {result.stderr!r}"
+        )
+
+
+def test_a_live_holder_is_never_stolen_from_even_when_its_pid_read_times_out(
+    tmp_path,
+):
+    """A REAL live holder whose pid file read happens to be merely slow (not
+    permanently stuck) must still be refused rather than stolen from, the
+    same as the already-broken-forever case: `_lock_try_steal` refuses
+    unconditionally on ANY timed-out read before it ever looks at content,
+    so a transient slow read on a genuinely healthy holder is not treated
+    any more favourably than a permanently stuck one -- which is also what
+    closes the gap a first cut of this fix had (a timeout on the live
+    holder's own read being misread as "confirmed dead").
+
+    The pid file is a FIFO with a delayed writer: opening a FIFO for read
+    blocks until a writer opens it too (POSIX rendezvous semantics), so the
+    read genuinely resolves eventually -- it is not broken, just slower
+    than `_LOCK_PID_READ_TIMEOUT`. A first cut of this test instead
+    replaced `cat` on PATH with a freshly-written shell script simulating
+    the same delay, which hung unreproducibly on a macOS CI runner
+    (plausibly Gatekeeper's first-run signature check on a brand-new
+    executable -- not confirmed, but not reproducible locally either,
+    which is itself consistent with a CI-VM-specific, first-run-only
+    cost). A FIFO depends on nothing but kernel pipe semantics and the
+    system's own, already-trusted `sh`/`cat`."""
+    lock_dir = tmp_path / "slow-live.lock"
+    lock_dir.mkdir()
+    holder = subprocess.Popen(["sleep", "10"])
+    pid_path = lock_dir / "pid"
+    os.mkfifo(pid_path)
+    writer = subprocess.Popen(
+        ["sh", "-c", f'sleep 5; printf "%s" "{holder.pid}" > "{pid_path}"']
+    )
+    try:
+        old_time = time.time() - 120
+        os.utime(lock_dir, (old_time, old_time))
+
+        result = _run(
+            f"""
+            source {LIB_LOCK_SH}
+            _LOCK_PID_READ_TIMEOUT=1
+            _LOCK_ADOPT_AFTER=5
+            lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+            """,
+            timeout=20,
+        )
+        assert "REFUSED" in result.stdout, (
+            f"a live holder must never be stolen from merely because its "
+            f"pid read was slow: {result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+        # Not writer.wait(): if the acquire call refused and exited before
+        # the backgrounded `cat` it killed ever completed the FIFO's
+        # read-side open(), no read-side open() ever happens again, and the
+        # writer's own (blocking) open() for write then hangs forever
+        # waiting for a peer that will never arrive. SIGKILL unblocks a
+        # process stuck in open() the same way it does for any blocking
+        # syscall -- waiting for it to exit on its own is what hung here.
+        writer.kill()
+        writer.wait(timeout=10)
+
+
+def test_a_reader_that_ignores_sigterm_is_still_bounded(tmp_path):
+    """Self-review follow-up to #1103: this function's own comment asserts
+    a SIGTERM to a process blocked in a slow read() unblocks it because no
+    handler is installed. A reader that DOES install one and ignores
+    SIGTERM -- or one genuinely stuck in the kernel's own uninterruptible
+    I/O wait -- left the `kill` a no-op and the unconditional `wait`
+    straight after it blocked with no timeout of its own. Confirmed
+    directly (not merely reasoned) before this fix: a `cat` shim here that
+    traps and ignores TERM made `_lock_read_pid_timeout` -- called with
+    `_LOCK_PID_READ_TIMEOUT=1` -- run for as long as the shim's own long
+    sleep did, well past a 10s wrapper timeout. The fix must escalate past
+    a SIGTERM that did not land rather than wait on it unconditionally."""
+    lock_dir = tmp_path / "ignores-term.lock"
+    lock_dir.mkdir()
+    pid_path = lock_dir / "pid"
+    os.mkfifo(pid_path)
+    bindir = tmp_path / "bin-sigterm-ignoring"
+    bindir.mkdir()
+    shim = bindir / "cat"
+    shim_body = (
+        "#!/bin/sh\n"
+        'target="' + str(pid_path) + '"\n'
+        'if [ "$1" = "$target" ]; then\n'
+        "    trap '' TERM\n"
+        "    sleep 30\n"
+        "else\n"
+        '    exec /bin/cat "$@"\n'
+        "fi\n"
+    )
+    shim.write_text(shim_body, encoding="utf-8")
+    shim.chmod(0o755)
+
+    t0 = time.time()
+    result = _run(
+        f"""
+        PATH="{bindir}:$PATH"
+        source {LIB_LOCK_SH}
+        _LOCK_PID_READ_TIMEOUT=1
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """,
+        timeout=10,
+    )
+    elapsed = time.time() - t0
+    assert "REFUSED" in result.stdout, (
+        f"a reader that ignores SIGTERM must still be bounded and refused, "
+        f"never acquired: {result.stdout!r} {result.stderr!r}"
+    )
+    assert elapsed < 8, (
+        f"a reader that ignores SIGTERM must not be waited on unconditionally "
+        f"-- this took {elapsed:.1f}s against a _LOCK_PID_READ_TIMEOUT of 1s "
+        f"and a 30s-sleeping shim, meaning the kill/wait path escalated "
+        f"rather than blocking on it: {result.stdout!r} {result.stderr!r}"
+    )
+
+
+def test_a_confirmed_empty_and_old_pid_file_is_still_reclaimed(tmp_path):
+    """Second-review finding: an earlier cut of the timeout-refusal fix
+    collapsed the confirmed-empty-pid branch and the timed-out-read branch
+    into one unconditional refusal, which also removed the ONLY path that
+    ever reclaims a pid file that exists and is empty forever (a holder
+    killed between `mkdir` and writing its pid) -- `_lock_try_adopt`
+    explicitly refuses whenever the pid file exists at all, timed out or
+    not. A confirmed-by-a-completed-read empty pid is a fact, not a guess
+    like a timeout is, so it must still be reclaimable once old enough."""
+    lock_dir = tmp_path / "confirmed-empty.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("", encoding="utf-8")
+    old_time = time.time() - 120
+    os.utime(lock_dir, (old_time, old_time))
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _LOCK_ADOPT_AFTER=5
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+    """)
+    assert "ACQUIRED" in result.stdout, (
+        f"a confirmed-empty, old pid file must still be reclaimable: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+
+
+def test_a_confirmed_empty_but_fresh_pid_file_is_not_reclaimed(tmp_path):
+    """Positive control for the test above: the same confirmed-empty pid
+    file, but too young to be debris, must still refuse -- the original
+    holder-mid-acquisition protection this age gate exists for."""
+    lock_dir = tmp_path / "confirmed-empty-fresh.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("", encoding="utf-8")
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _LOCK_ADOPT_AFTER=3600
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+    """)
+    assert "REFUSED" in result.stdout, (
+        f"a fresh, confirmed-empty pid file must not be reclaimed: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+
+
+def test_a_non_numeric_and_old_pid_file_is_still_reclaimed(tmp_path):
+    """Self-review follow-up to #1101/#1103: `_lock_try_steal` judges a
+    non-numeric pid file (e.g. "abc") the same branch as an empty one, but
+    an earlier cut cleared `$_pid` to "" right there -- before the
+    post-rename re-read that compares against it. The re-read then saw the
+    REAL content again ("abc"), compared it to the empty string it could
+    never equal, restored the file and refused -- every time, however old
+    the directory. A non-numeric pid file could never be reclaimed at all
+    (confirmed by reproduction: mkdir, write "abc", backdate the directory,
+    `lock_acquire ... 0` returns REFUSED and the pid file is still "abc")."""
+    lock_dir = tmp_path / "non-numeric.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("abc", encoding="utf-8")
+    old_time = time.time() - 120
+    os.utime(lock_dir, (old_time, old_time))
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _LOCK_ADOPT_AFTER=5
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+    """)
+    assert "ACQUIRED" in result.stdout, (
+        f"a non-numeric, old pid file must be reclaimable -- the same as "
+        f"the already-covered empty-pid case: {result.stdout!r} "
+        f"{result.stderr!r}"
+    )
+
+
+def test_a_non_numeric_but_fresh_pid_file_is_not_reclaimed(tmp_path):
+    """Positive control for the test above: the same non-numeric pid file,
+    but too young to be debris, must still refuse -- otherwise the age gate
+    above would not be doing anything and every non-numeric pid file would
+    be reclaimed on sight, holder-mid-acquisition included."""
+    lock_dir = tmp_path / "non-numeric-fresh.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("abc", encoding="utf-8")
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _LOCK_ADOPT_AFTER=3600
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+    """)
+    assert "REFUSED" in result.stdout, (
+        f"a fresh, non-numeric pid file must not be reclaimed: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert (lock_dir / "pid").read_text() == "abc", (
+        "a refused steal must leave the original, non-numeric pid file "
+        "content in place"
+    )
+
+
+def test_release_of_an_owned_lock_still_works_when_mktemp_is_unusable(
+    tmp_path,
+):
+    """Second-review finding: an earlier cut of _lock_read_pid_timeout's
+    mktemp-failure fallback refused unconditionally instead of degrading to
+    a direct read, which meant an unwritable/full TMPDIR -- an ordinary
+    operational problem with nothing to do with #1103's cloud-sync
+    placeholders -- made EVERY lock release and steal refuse, including a
+    release of a lock the releasing process legitimately owns. That is a
+    total lock outage strictly worse than the narrow hang this fix exists
+    to bound, and this test pins that releasing your own lock still works
+    when TMPDIR cannot be used for scratch space."""
+    lock_dir = tmp_path / "mktemp-unusable.lock"
+    unusable_tmpdir = tmp_path / "no-mktemp-here"
+    unusable_tmpdir.mkdir(mode=0o000)
+    try:
+        result = _run(
+            f"""
+            export TMPDIR="{unusable_tmpdir}"
+            source {LIB_LOCK_SH}
+            lock_acquire "{lock_dir}" 0 || {{ echo ACQUIRE_FAILED; exit 0; }}
+            lock_release "{lock_dir}" && echo RELEASED || echo REFUSED
+            """
+        )
+        assert "RELEASED" in result.stdout, (
+            f"releasing an owned lock must not fail just because TMPDIR is "
+            f"unusable: {result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        unusable_tmpdir.chmod(0o755)
+
+
+def test_release_refuses_rather_than_removes_on_a_timed_out_pid_read(tmp_path):
+    """Self-review finding: a release whose OWN pid read times out must
+    refuse (as it already does on a genuine ownership mismatch), never fall
+    through to removing a directory it could not confirm was its own. A
+    first cut treated the timeout the same as a legitimately empty pid
+    file, which skips the ownership check entirely and deletes
+    unconditionally -- reachable through this library's own documented
+    `trap 'lock_release "$LOCK_DIR"' EXIT` pattern by any process whose own
+    acquire never even succeeded."""
+    lock_dir = tmp_path / "other-slow.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+
+    result = _run(
+        f"""
+        source {LIB_LOCK_SH}
+        _LOCK_PID_READ_TIMEOUT=1
+        lock_release "{lock_dir}" && echo RELEASED || echo REFUSED
+        """,
+        timeout=20,
+    )
+    assert "REFUSED" in result.stdout, (
+        f"a release that cannot confirm ownership within the timeout must "
+        f"refuse, not remove the lock: {result.stdout!r} {result.stderr!r}"
+    )
+    assert lock_dir.exists(), (
+        "a refused release must leave the lock directory in place"
+    )
+
+
+def test_release_does_not_destroy_a_lock_a_concurrent_steal_just_won(tmp_path):
+    """Self-review follow-up to #1101/#1103, finding 3: a holder judged
+    stale (alive, but held past _LOCK_MAX_HOLD_SECONDS) races its own
+    legitimate release against a stealer taking the lock over. The read at
+    the top of _lock_release_impl and the rm -rf at the bottom are two
+    separate operations; a steal landing in between rewrites the pid file
+    to the new owner's, and nothing re-checked that before this fix --
+    rm -rf fired unconditionally once the FIRST check passed, deleting the
+    new owner's lock. A third process would then recreate the directory
+    and two holders would exist.
+
+    Deterministic, not concurrent: `_lock_self_set` is overridden to run a
+    real `_lock_try_steal` exactly once, synchronously, inside the first
+    call `_lock_release_impl` makes to it -- the precise window between
+    release's own pid read and its (fixed) atomic re-verify. The steal
+    itself runs as a GENUINELY SEPARATE bash process (a standalone
+    script, not a `()` subshell of the same interpreter): an earlier cut
+    of this test ran it in a subshell and gave it an identity via
+    `${BASHPID:-$$}`, correct only when $BASHPID exists. Without it
+    (bash 3.2 -- CI's macos-latest resolves "bash" there), $$ inside a
+    subshell reports the SAME pid as the outer shell (this file's own
+    top comment explains why: $$ does not update across a subshell,
+    only $BASHPID does), so the "stealer" and the release-holder
+    computed IDENTICAL identities and the race this test exists to
+    force never actually happened -- caught by CI, not locally, where
+    "bash" happens to resolve somewhere with $BASHPID. A real separate
+    process has its own real $$ on any bash version.
+    """
+    lock_dir = tmp_path / "race-release-steal.lock"
+    lock_dir.mkdir()
+    stealer_id_path = tmp_path / "stealer_id.txt"
+    steal_rc_path = tmp_path / "steal.rc"
+    stealer_script = tmp_path / "stealer.sh"
+    stealer_script.write_text(
+        f"""#!/bin/bash
+source {LIB_LOCK_SH}
+_lock_try_steal "{lock_dir}" >/dev/null 2>&1
+echo $? > "{steal_rc_path}"
+echo "$_LOCK_SELF" > "{stealer_id_path}"
+""",
+        encoding="utf-8",
+    )
+    stealer_script.chmod(0o755)
+    # REMEMBER_LOCK_MAX_HOLD_SECONDS, the public env knob -- not the
+    # internal _LOCK_MAX_HOLD_SECONDS shell variable. The stealer is now a
+    # genuinely separate process that sources lib-lock.sh fresh, and that
+    # sourcing unconditionally re-derives _LOCK_MAX_HOLD_SECONDS from the
+    # env knob (`"${{REMEMBER_LOCK_MAX_HOLD_SECONDS:-1800}}"`), so setting
+    # the internal variable in THIS process (as an earlier cut of this
+    # test did, correct only for the subshell design it has since moved
+    # away from) has no effect on the stealer at all -- it would judge
+    # the holder not-yet-stale at the real default of 1800s and legitimately
+    # refuse, which is a second, independent way this test silently failed
+    # to force the race it exists to test (caught by CI).
+    script = f"""
+    source {LIB_LOCK_SH}
+    export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
+    echo "$$" > "{lock_dir}/pid"
+    _STEAL_FIRED=0
+    _lock_self_set() {{
+        _LOCK_SELF="${{BASHPID:-$$}}"
+        if [ "$_STEAL_FIRED" != 1 ]; then
+            _STEAL_FIRED=1
+            "{stealer_script}"
+        fi
+    }}
+    lock_release "{lock_dir}"
+    echo "release_rc=$?"
+    """
+    result = _run(script)
+    assert result.returncode == 0, result.stderr
+    assert "release_rc=1" in result.stdout, (
+        f"a release racing a concurrent steal that already won must refuse, "
+        f"not report success: {result.stdout!r} {result.stderr!r}"
+    )
+    assert steal_rc_path.read_text().strip() == "0", (
+        f"the concurrent steal itself must have won for this to be a "
+        f"meaningful test of the race, not a vacuous pass: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert lock_dir.exists(), (
+        "the stale holder's release destroyed the lock directory the "
+        "concurrent steal had already taken over"
+    )
+    stealer_id = stealer_id_path.read_text().strip()
+    pid_file = lock_dir / "pid"
+    pid_now = pid_file.read_text().strip() if pid_file.exists() else "<missing>"
+    assert pid_now == stealer_id, (
+        f"the pid file no longer holds the stealer's own pid ({stealer_id!r}) "
+        f"after the stale holder's release ran -- got {pid_now!r}"
+    )
+
+
+def test_release_of_an_owned_uncontended_lock_still_succeeds(tmp_path):
+    """Positive control for the test above: without a concurrent steal, the
+    atomic re-verify the fix adds before rm -rf must not turn an ordinary,
+    uncontested release into a false refusal."""
+    lock_dir = tmp_path / "uncontended.lock"
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    lock_acquire "{lock_dir}" 0 || {{ echo ACQUIRE_FAILED; exit 0; }}
+    lock_release "{lock_dir}" && echo RELEASED || echo REFUSED
+    """)
+    assert "RELEASED" in result.stdout, (
+        f"an ordinary, uncontested release must still succeed: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert not lock_dir.exists(), (
+        "an ordinary release must still remove the lock directory"
+    )
+
+
+def test_release_does_not_destroy_a_lock_a_concurrent_adopter_just_won(tmp_path):
+    """Self-review (round 2) finding: the finding-3 fix above only re-checks
+    against a concurrent STEALER by comparing a content snapshot that can
+    never actually change (the rename target only this process ever
+    touches), which happens to still work because the rename to
+    pid.releasing.* and a stealer's own rename of ${_dir}/pid are racing
+    for the SAME source path, and whichever `mv` lands first simply makes
+    the other's `mv` fail outright. What that compare does NOT catch is a
+    concurrent ADOPTER: _lock_try_adopt fires whenever ${_dir}/pid is
+    ABSENT and the directory is old enough -- both true for the entire
+    window this release's own rename just opened (a stale-but-alive
+    holder's age already exceeds the adopt threshold in any sane
+    configuration), and an adopter creates a BRAND NEW ${_dir}/pid from
+    nothing, which a compare against our own untouched claim file can
+    never see. The fix checks whether ${_dir}/pid exists again instead.
+
+    Deterministic, not concurrent: `mv` is overridden to run a real
+    _lock_try_adopt immediately AFTER release's own `mv` of ${_dir}/pid
+    actually completes -- the precise moment ${_dir}/pid becomes absent,
+    which is exactly the window _lock_try_adopt needs to see. Overriding
+    _lock_self_set (as the steal-race test above does) would fire too
+    early here: that call happens BEFORE release's own rename, while
+    ${_dir}/pid still holds the stale holder's own pid, so an adopter
+    running there would simply see the pid file present and correctly
+    refuse -- never a meaningful race at all.
+
+    The adopter runs as a GENUINELY SEPARATE bash process, not a `()`
+    subshell of the same interpreter, same reasoning as the steal-race
+    test above: on a bash without $BASHPID (3.2 -- CI's macos-latest
+    resolves "bash" there), a subshell's $$ reports the SAME pid as the
+    outer shell, so echoing ${BASHPID:-$$} from inside the subshell and
+    separately trusting that it matches whatever _lock_try_adopt itself
+    wrote is not guaranteed. A real separate process reads back its own
+    $_LOCK_SELF after the call -- guaranteed the same value
+    _lock_try_adopt just wrote, since both come from one call in one
+    process (caught by CI, not locally).
+    """
+    lock_dir = tmp_path / "race-release-adopt.lock"
+    lock_dir.mkdir()
+    adopter_id_path = tmp_path / "adopter_id.txt"
+    adopt_rc_path = tmp_path / "adopt.rc"
+    adopter_script = tmp_path / "adopter.sh"
+    adopter_script.write_text(
+        f"""#!/bin/bash
+source {LIB_LOCK_SH}
+_lock_try_adopt "{lock_dir}" >/dev/null 2>&1
+echo $? > "{adopt_rc_path}"
+echo "$_LOCK_SELF" > "{adopter_id_path}"
+""",
+        encoding="utf-8",
+    )
+    adopter_script.chmod(0o755)
+    script = f"""
+    source {LIB_LOCK_SH}
+    export _LOCK_ADOPT_AFTER=0
+    echo "$$" > "{lock_dir}/pid"
+    _MV_FIRED=0
+    mv() {{
+        command mv "$@"
+        local _rc=$?
+        if [ "$_MV_FIRED" != 1 ] && [ "$1" = "{lock_dir}/pid" ]; then
+            _MV_FIRED=1
+            "{adopter_script}"
+        fi
+        return $_rc
+    }}
+    lock_release "{lock_dir}"
+    echo "release_rc=$?"
+    """
+    result = _run(script)
+    assert result.returncode == 0, result.stderr
+    assert "release_rc=1" in result.stdout, (
+        f"a release racing a concurrent adopter that already won must "
+        f"refuse, not report success: {result.stdout!r} {result.stderr!r}"
+    )
+    assert adopt_rc_path.read_text().strip() == "0", (
+        f"the concurrent adopter itself must have won for this to be a "
+        f"meaningful test of the race, not a vacuous pass: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert lock_dir.exists(), (
+        "the stale holder's release destroyed the lock directory the "
+        "concurrent adopter had already taken over"
+    )
+    adopter_id = adopter_id_path.read_text().strip()
+    pid_file = lock_dir / "pid"
+    pid_now = pid_file.read_text().strip() if pid_file.exists() else "<missing>"
+    assert pid_now == adopter_id, (
+        f"the pid file no longer holds the adopter's own pid ({adopter_id!r}) "
+        f"after the stale holder's release ran -- got {pid_now!r}"
     )
 
 
