@@ -989,6 +989,16 @@ _lock_release_impl() {
     # a concurrent steal's rename happens first wins; the other gets ENOENT
     # (or a content mismatch on re-read) and backs off instead of
     # proceeding on stale information.
+    # A known, accepted gap (review finding, left undone like the PID-
+    # recycling limitation documented at the top of this file rather than
+    # chased further): if THIS process is killed between the mv below and
+    # this function's own cleanup, the resulting pid.releasing.$_LOCK_SELF
+    # is stranded with a dead owner. _lock_try_steal reclaims an abandoned
+    # pid.stealing.* claim exactly this way; nothing here does the same for
+    # pid.releasing.* yet, so a crashed release can leave one stray file
+    # per occurrence. It does not wedge the lock -- _lock_try_adopt still
+    # reclaims the lock itself once the pid file is absent and the
+    # directory is old enough -- it only litters, narrowly and rarely.
     _claim="${_dir}/pid.releasing.${_LOCK_SELF}"
     if ! mv "${_dir}/pid" "$_claim" 2>/dev/null; then
         return 1
