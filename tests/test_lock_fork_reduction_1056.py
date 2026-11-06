@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -117,4 +118,56 @@ def test_uncontended_acquire_release_forks_cat_exactly_once_1101_1103(tmp_path):
         f"an uncontended acquire+release forked cat {len(cats)} times -- "
         f"expected exactly one (the bounded background read of the pid "
         f"file release owns): {cats}"
+    )
+
+
+def test_uncontended_acquire_release_does_not_pay_the_timeout_bound_1101_1103(
+    tmp_path,
+):
+    """Scheduler-measured follow-up to the two tests above: a fork-count
+    assertion alone missed a real regression, because the cost it never
+    saw was never a fork -- it was a FORCED minimum sleep. Measured
+    directly against this branch before this fix: 20 uncontended
+    lock_acquire+lock_release pairs averaged ~70-115ms EACH (machine- and
+    pipe-capture-dependent -- see the comment in _lock_read_pid_timeout on
+    why), against ~9-25ms on origin/main with no bound at all. The fix
+    replaced an iteration-count poll loop (which must sleep at least once
+    before its first `kill -0` can ever see the reader as exited, because
+    a not-yet-reaped zombie still reports "alive") with a background
+    watchdog that owns the timeout entirely, so the main thread pays only
+    a single blocking `wait` that returns the instant the reader actually
+    exits.
+
+    N=10 repeated pairs, averaged, to damp single-run noise; the
+    threshold is wide enough to tolerate a loaded CI runner but narrow
+    enough that a regression back to the old poll-loop shape (or the
+    FD-inheritance bug the watchdog fix itself briefly introduced, see
+    the same comment) fails this loudly rather than silently passing
+    under a bound nobody would ever notice.
+    """
+    N = 10
+    script = f"""
+    source "{LIB_LOCK_SH}"
+    for i in $(seq 1 {N}); do
+        D="{tmp_path}/fast-$i.lock"
+        rm -rf "$D"
+        lock_acquire "$D" 0 >/dev/null
+        lock_release "$D" >/dev/null
+    done
+    """
+    t0 = time.time()
+    result = subprocess.run(
+        [BASH, "-c", script],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    elapsed = time.time() - t0
+    assert result.returncode == 0, result.stderr[-2000:]
+    per_pair_ms = elapsed / N * 1000
+    assert per_pair_ms < 50, (
+        f"an uncontended lock_acquire+lock_release pair averaged "
+        f"{per_pair_ms:.1f}ms over {N} pairs -- expected close to main's "
+        f"own ~10-25ms, well under the ~70-115ms this pins as a "
+        f"regression (the bounded pid-file read's own timeout machinery "
+        f"must not be paid on the fast, uncontended path): "
+        f"{result.stdout!r} {result.stderr!r}"
     )

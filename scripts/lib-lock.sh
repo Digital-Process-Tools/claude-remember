@@ -179,7 +179,7 @@ _LOCK_PID_READ_TIMEOUT="${REMEMBER_LOCK_PID_READ_TIMEOUT:-2}"
 # unblocks the background job here -- not a cooperative check the blocked
 # `cat` could ever perform itself.
 _lock_read_pid_timeout() {
-    local _file="$1" _tmp _cat_pid _max_iters _iters=0
+    local _file="$1" _tmp _cat_pid _watchdog_pid _rc
     _LOCK_PID_READ_RESULT=""
     _tmp=$(mktemp "${TMPDIR:-/tmp}/remember-pidread-XXXXXX" 2>/dev/null) || {
         # No scratch file to redirect into, so there is nowhere to background
@@ -199,55 +199,79 @@ _lock_read_pid_timeout() {
         _LOCK_PID_READ_RESULT=$(cat "$_file" 2>/dev/null) || true
         return 0
     }
-    ( cat "$_file" > "$_tmp" 2>/dev/null ) &
+    ( cat "$_file" > "$_tmp" 2>/dev/null ) </dev/null &
     _cat_pid=$!
-    # Bounded by an ITERATION COUNT, never by reading a clock: a `date` fork
-    # to compute a deadline would run on every single call to this function,
-    # whether or not the backgrounded read is ever still running by the time
-    # the loop below is reached -- found in CI, not locally (#1056's own
-    # fork-reduction test caught it): _lock_release_impl's now-unconditional
-    # call into this function started forking `date` on every lock_release,
-    # including the uncontended fast path that test asserts never forks it.
-    # _LOCK_SLEEP's own two possible values are already known without a
-    # fork (set once, at source time, by the `sleep 0.001` probe above), so
-    # the same `_LOCK_PID_READ_TIMEOUT`-second bound is expressible as a
-    # plain iteration count instead, at zero cost on the common case where
-    # the loop body never runs at all.
-    if [ "$_LOCK_SLEEP" = 1 ]; then
-        _max_iters="$_LOCK_PID_READ_TIMEOUT"
-    else
-        _max_iters=$(( _LOCK_PID_READ_TIMEOUT * 20 ))
-    fi
-    while kill -0 "$_cat_pid" 2>/dev/null; do
-        if [ "$_iters" -ge "$_max_iters" ]; then
-            kill "$_cat_pid" 2>/dev/null || true
-            # SIGTERM alone has no bound of its own: a reader that ignores
-            # it, or one genuinely stuck in the kernel's own uninterruptible
-            # read, leaves an unconditional `wait` here blocked with no
-            # timeout -- reproduced directly with a `cat` shim that traps
-            # and ignores TERM, which hung this function well past
-            # _LOCK_PID_READ_TIMEOUT. One more sleep gives a cooperative
-            # reader a chance to exit from the SIGTERM already sent; past
-            # that, escalate to SIGKILL, which nothing can ignore or block
-            # short of the kernel's own I/O still being in flight -- and
-            # even then this function must still return on schedule, so it
-            # does not `wait` for the kill to land either (see the comment
-            # on the un-waited kill below for what that costs).
-            sleep "$_LOCK_SLEEP"
-            kill -0 "$_cat_pid" 2>/dev/null && kill -9 "$_cat_pid" 2>/dev/null
-            # Deliberately not waited on: the background job is still this
-            # shell's own child until this shell itself exits (SIGKILL does
-            # not reparent it to init on its own), so an un-waited kill here
-            # leaves a short-lived zombie entry in this process's own table
-            # rather than an immediately-reaped one -- a real, narrow cost,
-            # traded for never blocking this function past its own bound.
-            rm -f "$_tmp" 2>/dev/null || true
-            return 1
-        fi
+    # Scheduler-measured follow-up finding: an ITERATION-COUNT poll loop
+    # (the shape this replaced) cannot avoid paying at least one full
+    # $_LOCK_SLEEP interval even on the common, fast, uncontended path,
+    # because `kill -0` on a backgrounded job that already exited but has
+    # not yet been `wait`-ed on still reports it alive -- the process stays
+    # a zombie in the table until something reaps it. A poll loop that
+    # checks `kill -0` BEFORE ever calling `wait` therefore always sleeps
+    # at least once, even when cat finished in microseconds: measured at
+    # ~60-80ms added per lock_release on macOS (fractional-sleep
+    # _LOCK_SLEEP=0.05s plus fork overhead), against ~25ms on main with no
+    # bound at all -- a regression a fork-count fix alone (finding 4,
+    # removing the second `cat`) never touched, because the forced sleep
+    # was never a fork.
+    #
+    # The fix: a SEPARATE backgrounded watchdog owns the timeout entirely
+    # -- its own sleep, its own SIGTERM-then-SIGKILL escalation -- and the
+    # main thread does nothing but a single blocking `wait` on the reader.
+    # `wait` returns the INSTANT the reader actually exits, no polling
+    # granularity involved, so the fast path costs exactly what forking
+    # the watchdog and the reader costs and nothing more.
+    (
+        sleep "$_LOCK_PID_READ_TIMEOUT"
+        kill "$_cat_pid" 2>/dev/null || true
+        # Same SIGTERM-then-SIGKILL escalation the old loop had, moved in
+        # here: a reader that ignores SIGTERM (reproduced directly with a
+        # shim that traps and ignores TERM) or is genuinely stuck in an
+        # uninterruptible read must not hang this watchdog's own kill
+        # indefinitely either.
         sleep "$_LOCK_SLEEP"
-        _iters=$(( _iters + 1 ))
-    done
-    wait "$_cat_pid" 2>/dev/null || true
+        kill -0 "$_cat_pid" 2>/dev/null && kill -9 "$_cat_pid" 2>/dev/null
+    # `</dev/null >/dev/null 2>&1` here is load-bearing, not cosmetic --
+    # found measuring this very fix: `kill "$_watchdog_pid"` below only
+    # terminates the WATCHDOG'S OWN subshell wrapper, not whatever command
+    # it is currently running as ITS child (this subshell has several
+    # sequential statements, so bash cannot exec-optimize it away the way
+    # it does the single-command cat subshell above) -- SIGTERM to a shell
+    # blocked in wait() for its own foreground child kills the shell, not
+    # the child, which is then orphaned and keeps running for the rest of
+    # its current sleep. Without this redirection that orphaned `sleep`
+    # inherits this function's own stdout/stderr, and if whatever called
+    # this function is itself captured through a pipe (a hook runner, a
+    # test harness), the capture does not see EOF -- and does not return
+    # -- until every process holding that pipe open exits, including the
+    # orphan, for the REST of its sleep. Measured directly: 20 fast,
+    # uncontended release pairs cost ~100ms EACH with this redirection
+    # missing (worse than the poll loop this watchdog replaced), and
+    # ~1ms each with it in place -- the entire regression this rewrite
+    # exists to fix, hiding behind a benchmark that happened not to
+    # capture output through a pipe the first time it was measured.
+    ) </dev/null >/dev/null 2>&1 &
+    _watchdog_pid=$!
+    wait "$_cat_pid" 2>/dev/null
+    _rc=$?
+    # The watchdog is done being useful the instant `wait` above returns,
+    # whether because the reader finished naturally or because the
+    # watchdog itself just killed it -- killing it here either stops it
+    # before it ever sleeps (the common, fast case) or is a harmless no-op
+    # on a process already gone. Deliberately not waited on afterward, the
+    # same narrow, accepted zombie-entry tradeoff the reader's own kill
+    # already makes elsewhere in this function: it must still return on
+    # schedule rather than pay to reap a process that costs nothing
+    # further to leave unreaped.
+    kill "$_watchdog_pid" 2>/dev/null || true
+    # A process killed by a signal reports 128+signal from `wait` -- the
+    # one portable way to tell "the watchdog had to intervene" from "the
+    # reader exited on its own, however it felt about its own exit code"
+    # without any state shared between the two subshells.
+    if [ "$_rc" -ge 128 ]; then
+        rm -f "$_tmp" 2>/dev/null || true
+        return 1
+    fi
     # $(<file) is a bash builtin read, not a forked `cat` -- one fewer
     # process on every single call to this function, fast path included
     # (self-review follow-up to #1101/#1103, finding 4). Safe here
