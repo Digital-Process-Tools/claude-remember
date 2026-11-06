@@ -404,6 +404,100 @@ def test_detach_windows_wsh_enabled_still_uses_hidden_launcher(tmp_path):
 
 
 @_NO_BASH
+def test_detach_windows_wsh_disabled_via_reg_sz_zero(tmp_path):
+    """#1104 review finding (MEDIUM): a hardening guide commonly creates
+    this value as REG_SZ "0" rather than REG_DWORD 0x0 -- and WSH itself
+    honours that shape, not just the hex-formatted DWORD. The probe's own
+    string match must accept it too."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    captured = tmp_path / "captured.txt"
+    _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    _stub(bindir / "reg.exe", 'printf "    Enabled    REG_SZ    0\\r\\n"')
+    env = _controlled_env(path=f"{bindir}:/usr/bin:/bin", TMPDIR=str(tmp_path))
+    out = tmp_path / "out.log"
+    pid = tmp_path / "pid"
+    r = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"',
+        env,
+    )
+    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert not captured.exists(), (
+        "wscript.exe was invoked despite a REG_SZ Enabled=0 reporting WSH disabled"
+    )
+
+
+@_NO_BASH
+def test_detach_windows_wsh_disabled_value_name_case_insensitive(tmp_path):
+    """#1104 review finding (MEDIUM): reg.exe value names are
+    case-insensitive -- an admin who created the value as lowercase
+    `enabled` rather than the canonical `Enabled` must still be detected
+    as disabling WSH."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    captured = tmp_path / "captured.txt"
+    _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    _stub(bindir / "reg.exe", 'printf "    enabled    REG_DWORD    0x0\\r\\n"')
+    env = _controlled_env(path=f"{bindir}:/usr/bin:/bin", TMPDIR=str(tmp_path))
+    out = tmp_path / "out.log"
+    pid = tmp_path / "pid"
+    r = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"',
+        env,
+    )
+    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert not captured.exists(), (
+        "wscript.exe was invoked despite a lowercase 'enabled' value name reporting WSH disabled"
+    )
+
+
+@_NO_BASH
+def test_detach_windows_hklm_disabled_hkcu_enabled_still_skips_conservatively(tmp_path):
+    """#1104 review round 2 (LOW, reasoned not observed): several
+    independent, long-standing, non-Microsoft hardening sources describe
+    an `IgnoreUserSettings` HKLM value that, when absent, lets a per-user
+    HKCU Enabled=1 actually override a machine-wide HKLM Enabled=0 and WSH
+    still runs for that user -- but no Microsoft-authored documentation
+    confirms that precedence rule (see lib-detach.sh's own comment at
+    _remember_detach_windows_wsh_disabled). Rather than implement an
+    unconfirmed precedence rule, this function deliberately stays
+    conservative: HKLM is queried first and, if IT alone reports
+    Enabled=0, the loop returns disabled immediately and never even
+    queries HKCU -- so a host with this exact conflicting shape still
+    gets the hidden route skipped, even in the one case where WSH itself
+    might actually still work for that user. This test pins that
+    documented choice as real, observed behavior, not merely a comment
+    that could silently drift from the code."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    captured = tmp_path / "captured.txt"
+    _stub(bindir / "wscript.exe", f'printf "%s\\n" "$@" > "{captured}"')
+    _stub(bindir / "cygpath", 'shift; printf "%s" "$1"')
+    _stub(bindir / "reg.exe", (
+        'case "$2" in\n'
+        '    *HKLM*) printf "    Enabled    REG_DWORD    0x0\\r\\n" ;;\n'
+        '    *HKCU*) printf "    Enabled    REG_DWORD    0x1\\r\\n" ;;\n'
+        'esac'
+    ))
+    env = _controlled_env(path=f"{bindir}:/usr/bin:/bin", TMPDIR=str(tmp_path))
+    out = tmp_path / "out.log"
+    pid = tmp_path / "pid"
+    r = _run(
+        f'. "{LIB}"; _remember_detach_windows "{out}" "{pid}" echo hi; echo "RC=$?"',
+        env,
+    )
+    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert not captured.exists(), (
+        "wscript.exe was invoked despite HKLM reporting WSH disabled -- "
+        "the conservative any-hive-disabled choice must win over a "
+        "conflicting HKCU Enabled=1, per this file's own documented, "
+        "unconfirmed-precedence reasoning"
+    )
+
+
+@_NO_BASH
 def test_detach_windows_reg_exe_missing_is_unaffected(tmp_path):
     """reg.exe absent entirely (a minimal Git Bash install, or any
     non-Windows CI host) must be treated as "can't tell", never as a new
