@@ -179,7 +179,7 @@ _LOCK_PID_READ_TIMEOUT="${REMEMBER_LOCK_PID_READ_TIMEOUT:-2}"
 # unblocks the background job here -- not a cooperative check the blocked
 # `cat` could ever perform itself.
 _lock_read_pid_timeout() {
-    local _file="$1" _tmp _cat_pid _watchdog_pid _rc
+    local _file="$1" _tmp _cat_pid _watchdog_pid _rc _max_iters _iters=0
     _LOCK_PID_READ_RESULT=""
     _tmp=$(mktemp "${TMPDIR:-/tmp}/remember-pidread-XXXXXX" 2>/dev/null) || {
         # No scratch file to redirect into, so there is nowhere to background
@@ -202,54 +202,70 @@ _lock_read_pid_timeout() {
     ( cat "$_file" > "$_tmp" 2>/dev/null ) </dev/null &
     _cat_pid=$!
     # Scheduler-measured follow-up finding: an ITERATION-COUNT poll loop
-    # (the shape this replaced) cannot avoid paying at least one full
-    # $_LOCK_SLEEP interval even on the common, fast, uncontended path,
-    # because `kill -0` on a backgrounded job that already exited but has
-    # not yet been `wait`-ed on still reports it alive -- the process stays
-    # a zombie in the table until something reaps it. A poll loop that
-    # checks `kill -0` BEFORE ever calling `wait` therefore always sleeps
-    # at least once, even when cat finished in microseconds: measured at
-    # ~60-80ms added per lock_release on macOS (fractional-sleep
-    # _LOCK_SLEEP=0.05s plus fork overhead), against ~25ms on main with no
+    # run on the MAIN THREAD (the shape this replaced) cannot avoid paying
+    # at least one full $_LOCK_SLEEP interval even on the common, fast,
+    # uncontended path, because `kill -0` on a backgrounded job that
+    # already exited but has not yet been `wait`-ed on still reports it
+    # alive -- the process stays a zombie in the table until something
+    # reaps it, and a loop that checks `kill -0` BEFORE ever calling
+    # `wait` therefore always sleeps at least once. Measured at ~60-80ms
+    # added per lock_release on macOS, against ~25ms on main with no
     # bound at all -- a regression a fork-count fix alone (finding 4,
     # removing the second `cat`) never touched, because the forced sleep
     # was never a fork.
     #
-    # The fix: a SEPARATE backgrounded watchdog owns the timeout entirely
-    # -- its own sleep, its own SIGTERM-then-SIGKILL escalation -- and the
-    # main thread does nothing but a single blocking `wait` on the reader.
-    # `wait` returns the INSTANT the reader actually exits, no polling
-    # granularity involved, so the fast path costs exactly what forking
-    # the watchdog and the reader costs and nothing more.
+    # The fix: a SEPARATE backgrounded watchdog owns the timeout entirely,
+    # so the main thread does nothing but a single blocking `wait` on the
+    # reader -- which returns the INSTANT the reader actually exits, no
+    # polling granularity on the main thread at all.
+    #
+    # The watchdog's OWN loop still polls, deliberately -- a second-review
+    # finding on the first cut of this fix, which had the watchdog `sleep
+    # "$_LOCK_PID_READ_TIMEOUT"` in one blocking call: SIGTERM to a shell
+    # blocked in wait() for its own foreground child (that long `sleep`)
+    # kills the shell, not the child, which is then orphaned and keeps
+    # running for the REST of the full timeout (reproduced directly: a
+    # fresh `sleep 2` still alive in `ps`, reparented to pid 1, right
+    # after the fast/uncontended path returned) -- a real, if narrow,
+    # resource cost nothing in the first cut accounted for, on literally
+    # every call. Polling in small `$_LOCK_SLEEP` steps instead means the
+    # watchdog notices the reader is gone (including via the SAME
+    # zombie-until-reaped mechanism the main thread no longer has to wait
+    # out) within about one poll interval of the main thread's own `wait`
+    # reaping it, and simply exits its own loop -- no kill, no orphan, no
+    # lingering process past that single short interval.
     (
-        sleep "$_LOCK_PID_READ_TIMEOUT"
-        kill "$_cat_pid" 2>/dev/null || true
-        # Same SIGTERM-then-SIGKILL escalation the old loop had, moved in
-        # here: a reader that ignores SIGTERM (reproduced directly with a
-        # shim that traps and ignores TERM) or is genuinely stuck in an
-        # uninterruptible read must not hang this watchdog's own kill
-        # indefinitely either.
-        sleep "$_LOCK_SLEEP"
-        kill -0 "$_cat_pid" 2>/dev/null && kill -9 "$_cat_pid" 2>/dev/null
-    # `</dev/null >/dev/null 2>&1` here is load-bearing, not cosmetic --
-    # found measuring this very fix: `kill "$_watchdog_pid"` below only
-    # terminates the WATCHDOG'S OWN subshell wrapper, not whatever command
-    # it is currently running as ITS child (this subshell has several
-    # sequential statements, so bash cannot exec-optimize it away the way
-    # it does the single-command cat subshell above) -- SIGTERM to a shell
-    # blocked in wait() for its own foreground child kills the shell, not
-    # the child, which is then orphaned and keeps running for the rest of
-    # its current sleep. Without this redirection that orphaned `sleep`
-    # inherits this function's own stdout/stderr, and if whatever called
-    # this function is itself captured through a pipe (a hook runner, a
-    # test harness), the capture does not see EOF -- and does not return
-    # -- until every process holding that pipe open exits, including the
-    # orphan, for the REST of its sleep. Measured directly: 20 fast,
-    # uncontended release pairs cost ~100ms EACH with this redirection
-    # missing (worse than the poll loop this watchdog replaced), and
-    # ~1ms each with it in place -- the entire regression this rewrite
-    # exists to fix, hiding behind a benchmark that happened not to
-    # capture output through a pipe the first time it was measured.
+        if [ "$_LOCK_SLEEP" = 1 ]; then
+            _max_iters="$_LOCK_PID_READ_TIMEOUT"
+        else
+            _max_iters=$(( _LOCK_PID_READ_TIMEOUT * 20 ))
+        fi
+        while kill -0 "$_cat_pid" 2>/dev/null; do
+            if [ "$_iters" -ge "$_max_iters" ]; then
+                kill "$_cat_pid" 2>/dev/null || true
+                # Same SIGTERM-then-SIGKILL escalation the original fix
+                # had: a reader that ignores SIGTERM (reproduced directly
+                # with a shim that traps and ignores TERM) or is
+                # genuinely stuck in an uninterruptible read must not
+                # hang this watchdog's own kill indefinitely either.
+                sleep "$_LOCK_SLEEP"
+                kill -0 "$_cat_pid" 2>/dev/null && kill -9 "$_cat_pid" 2>/dev/null
+                break
+            fi
+            sleep "$_LOCK_SLEEP"
+            _iters=$(( _iters + 1 ))
+        done
+    # `</dev/null >/dev/null 2>&1` here is still load-bearing: even
+    # bounded to one short poll interval past the main thread's own
+    # `wait`, the watchdog is still a process this function's caller did
+    # not ask for, and if whatever called this function is itself
+    # captured through a pipe (a hook runner, a test harness), an
+    # unredirected child inheriting that pipe's write end would delay
+    # the caller seeing EOF until this one also exits -- not the ~2s a
+    # single long `sleep` could cost, but still a real, avoidable delay
+    # for zero benefit, and the ~100ms/pair regression a missing
+    # redirection on the ORIGINAL (single-long-sleep) design measured
+    # directly is the same class of cost this closes off entirely.
     ) </dev/null >/dev/null 2>&1 &
     _watchdog_pid=$!
     wait "$_cat_pid" 2>/dev/null

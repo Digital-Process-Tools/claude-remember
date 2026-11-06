@@ -95,6 +95,27 @@ def test_uncontended_lock_acquire_forks_neither_dirname_nor_date_1056(tmp_path):
     )
 
 
+def _bash_has_bashpid() -> bool:
+    """Whether BASH is new enough to have $BASHPID.
+
+    _lock_self_set takes a zero-fork fast path when $BASHPID is set, and a
+    slow path (mktemp + a forked `sh` + a forked `cat` to read back what
+    the `sh` wrote) when it is not -- bash 3.2, the version Apple still
+    ships as /bin/bash, never defines it (#182's own top-of-file comment).
+    Whichever `bash` this test suite's own BASH resolved to may or may not
+    be that one, platform and PATH both deciding it -- CI's macos-latest
+    runner resolved "bash" to /bin/bash and took the slow path even
+    though this exact test was written and first passed against a
+    homebrew bash on a dev machine where "bash" resolves elsewhere and
+    has $BASHPID (#1101/#1103 follow-up, caught by CI, not locally).
+    """
+    result = subprocess.run(
+        [BASH, "-c", 'echo "${BASHPID:+yes}"'],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    return result.stdout.strip() == "yes"
+
+
 @_needs_coreutils_shims
 def test_uncontended_acquire_release_forks_cat_exactly_once_1101_1103(tmp_path):
     """Self-review follow-up to #1101/#1103, finding 4: _lock_release_impl's
@@ -105,19 +126,30 @@ def test_uncontended_acquire_release_forks_cat_exactly_once_1101_1103(tmp_path):
     reason: the scratch file it reads is one this same function just wrote
     moments ago via mktemp, never the caller's own (possibly dataless)
     file the bound exists to guard, so a bash builtin read ($(<file)) is
-    exactly as safe there and costs one fork less. An uncontended
-    acquire+release round trip (the first mkdir just succeeds, so
-    _lock_try_steal is never reached) calls the timed read exactly once --
-    from release -- so there must be exactly one cat fork in the whole
-    chain: not two (the pre-fix drain), and not zero (which would mean the
-    bounded background read itself vanished, not just the redundant
-    drain)."""
+    exactly as safe there and costs one fork less.
+
+    The expected count is PLATFORM-DEPENDENT, not a flat 1 -- caught by CI
+    after an earlier cut of this test hardcoded 1 and went red on
+    macos-latest, which resolves "bash" to /bin/bash (3.2, no $BASHPID).
+    _lock_self_set is called once by acquire (on the winning `mkdir`) and
+    once by release (for its ownership check); each of those calls forks
+    its OWN `cat` on a bash without $BASHPID (reading back what a forked
+    `sh -c 'echo $PPID'` wrote), two calls nothing in THIS test is
+    exercising or trying to fix. An uncontended acquire+release round
+    trip (the first mkdir just succeeds, so _lock_try_steal is never
+    reached) calls the bounded pid-file read exactly once -- from release
+    -- contributing exactly one more cat fork on top of whatever
+    _lock_self_set itself costs on this platform.
+    """
     recorded = _uncontended_acquire_spawns(tmp_path)
     cats = [s for s in recorded if s.startswith("cat ")]
-    assert len(cats) == 1, (
+    expected = 1 if _bash_has_bashpid() else 3
+    assert len(cats) == expected, (
         f"an uncontended acquire+release forked cat {len(cats)} times -- "
-        f"expected exactly one (the bounded background read of the pid "
-        f"file release owns): {cats}"
+        f"expected {expected} ({'the bounded pid-file read alone, since '
+        '$BASHPID makes _lock_self_set a zero-fork path' if expected == 1 else
+        'the bounded pid-file read plus one per _lock_self_set call (acquire '
+        'and release), since this bash has no $BASHPID'}): {cats}"
     )
 
 

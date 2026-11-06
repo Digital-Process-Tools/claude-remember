@@ -874,31 +874,59 @@ def test_release_does_not_destroy_a_lock_a_concurrent_steal_just_won(tmp_path):
     new owner's lock. A third process would then recreate the directory
     and two holders would exist.
 
-    Deterministic, not concurrent: _lock_self_set is overridden to run a
-    real _lock_try_steal, in a subshell so it gets its own distinct
-    identity via BASHPID exactly as a second process would, exactly once,
-    synchronously inside the first call _lock_release_impl makes to it --
-    the precise window between release's own pid read and its (fixed)
-    atomic re-verify.
+    Deterministic, not concurrent: `_lock_self_set` is overridden to run a
+    real `_lock_try_steal` exactly once, synchronously, inside the first
+    call `_lock_release_impl` makes to it -- the precise window between
+    release's own pid read and its (fixed) atomic re-verify. The steal
+    itself runs as a GENUINELY SEPARATE bash process (a standalone
+    script, not a `()` subshell of the same interpreter): an earlier cut
+    of this test ran it in a subshell and gave it an identity via
+    `${BASHPID:-$$}`, correct only when $BASHPID exists. Without it
+    (bash 3.2 -- CI's macos-latest resolves "bash" there), $$ inside a
+    subshell reports the SAME pid as the outer shell (this file's own
+    top comment explains why: $$ does not update across a subshell,
+    only $BASHPID does), so the "stealer" and the release-holder
+    computed IDENTICAL identities and the race this test exists to
+    force never actually happened -- caught by CI, not locally, where
+    "bash" happens to resolve somewhere with $BASHPID. A real separate
+    process has its own real $$ on any bash version.
     """
     lock_dir = tmp_path / "race-release-steal.lock"
     lock_dir.mkdir()
     stealer_id_path = tmp_path / "stealer_id.txt"
     steal_rc_path = tmp_path / "steal.rc"
+    stealer_script = tmp_path / "stealer.sh"
+    stealer_script.write_text(
+        f"""#!/bin/bash
+source {LIB_LOCK_SH}
+_lock_try_steal "{lock_dir}" >/dev/null 2>&1
+echo $? > "{steal_rc_path}"
+echo "$_LOCK_SELF" > "{stealer_id_path}"
+""",
+        encoding="utf-8",
+    )
+    stealer_script.chmod(0o755)
+    # REMEMBER_LOCK_MAX_HOLD_SECONDS, the public env knob -- not the
+    # internal _LOCK_MAX_HOLD_SECONDS shell variable. The stealer is now a
+    # genuinely separate process that sources lib-lock.sh fresh, and that
+    # sourcing unconditionally re-derives _LOCK_MAX_HOLD_SECONDS from the
+    # env knob (`"${{REMEMBER_LOCK_MAX_HOLD_SECONDS:-1800}}"`), so setting
+    # the internal variable in THIS process (as an earlier cut of this
+    # test did, correct only for the subshell design it has since moved
+    # away from) has no effect on the stealer at all -- it would judge
+    # the holder not-yet-stale at the real default of 1800s and legitimately
+    # refuse, which is a second, independent way this test silently failed
+    # to force the race it exists to test (caught by CI).
     script = f"""
     source {LIB_LOCK_SH}
-    _LOCK_MAX_HOLD_SECONDS=0
+    export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
     echo "$$" > "{lock_dir}/pid"
     _STEAL_FIRED=0
     _lock_self_set() {{
         _LOCK_SELF="${{BASHPID:-$$}}"
         if [ "$_STEAL_FIRED" != 1 ]; then
             _STEAL_FIRED=1
-            (
-                _lock_try_steal "{lock_dir}" >/dev/null 2>&1
-                echo $? > "{steal_rc_path}"
-                echo "${{BASHPID:-$$}}" > "{stealer_id_path}"
-            )
+            "{stealer_script}"
         fi
     }}
     lock_release "{lock_dir}"
@@ -964,23 +992,44 @@ def test_release_does_not_destroy_a_lock_a_concurrent_adopter_just_won(tmp_path)
     never see. The fix checks whether ${_dir}/pid exists again instead.
 
     Deterministic, not concurrent: `mv` is overridden to run a real
-    _lock_try_adopt in a subshell immediately AFTER release's own `mv`
-    of ${_dir}/pid actually completes -- the precise moment ${_dir}/pid
-    becomes absent, which is exactly the window _lock_try_adopt needs to
-    see. Overriding _lock_self_set (as the steal-race test above does)
-    would fire too early here: that call happens BEFORE release's own
-    rename, while ${_dir}/pid still holds the stale holder's own pid, so
-    an adopter running there would simply see the pid file present and
-    correctly refuse -- never a meaningful race at all.
+    _lock_try_adopt immediately AFTER release's own `mv` of ${_dir}/pid
+    actually completes -- the precise moment ${_dir}/pid becomes absent,
+    which is exactly the window _lock_try_adopt needs to see. Overriding
+    _lock_self_set (as the steal-race test above does) would fire too
+    early here: that call happens BEFORE release's own rename, while
+    ${_dir}/pid still holds the stale holder's own pid, so an adopter
+    running there would simply see the pid file present and correctly
+    refuse -- never a meaningful race at all.
+
+    The adopter runs as a GENUINELY SEPARATE bash process, not a `()`
+    subshell of the same interpreter, same reasoning as the steal-race
+    test above: on a bash without $BASHPID (3.2 -- CI's macos-latest
+    resolves "bash" there), a subshell's $$ reports the SAME pid as the
+    outer shell, so echoing ${BASHPID:-$$} from inside the subshell and
+    separately trusting that it matches whatever _lock_try_adopt itself
+    wrote is not guaranteed. A real separate process reads back its own
+    $_LOCK_SELF after the call -- guaranteed the same value
+    _lock_try_adopt just wrote, since both come from one call in one
+    process (caught by CI, not locally).
     """
     lock_dir = tmp_path / "race-release-adopt.lock"
     lock_dir.mkdir()
     adopter_id_path = tmp_path / "adopter_id.txt"
     adopt_rc_path = tmp_path / "adopt.rc"
+    adopter_script = tmp_path / "adopter.sh"
+    adopter_script.write_text(
+        f"""#!/bin/bash
+source {LIB_LOCK_SH}
+_lock_try_adopt "{lock_dir}" >/dev/null 2>&1
+echo $? > "{adopt_rc_path}"
+echo "$_LOCK_SELF" > "{adopter_id_path}"
+""",
+        encoding="utf-8",
+    )
+    adopter_script.chmod(0o755)
     script = f"""
     source {LIB_LOCK_SH}
-    _LOCK_MAX_HOLD_SECONDS=0
-    _LOCK_ADOPT_AFTER=0
+    export _LOCK_ADOPT_AFTER=0
     echo "$$" > "{lock_dir}/pid"
     _MV_FIRED=0
     mv() {{
@@ -988,11 +1037,7 @@ def test_release_does_not_destroy_a_lock_a_concurrent_adopter_just_won(tmp_path)
         local _rc=$?
         if [ "$_MV_FIRED" != 1 ] && [ "$1" = "{lock_dir}/pid" ]; then
             _MV_FIRED=1
-            (
-                _lock_try_adopt "{lock_dir}" >/dev/null 2>&1
-                echo $? > "{adopt_rc_path}"
-                echo "${{BASHPID:-$$}}" > "{adopter_id_path}"
-            )
+            "{adopter_script}"
         fi
         return $_rc
     }}
