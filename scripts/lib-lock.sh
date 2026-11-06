@@ -5,12 +5,16 @@
 # Why a directory and not a file:
 #
 #   `mkdir` either creates the directory or fails. One syscall, no check-then-
-#   act, no window -- on every platform this held true against until #1108:
-#   Ubuntu 26.04's `mkdir` reported success for a directory that already
-#   existed, at rates up to 10/10 rounds of overlap. `_lock_acquire_impl`
-#   below does not take that return code as ownership on its own any more --
-#   see the noclobber guard at its primary `mkdir` call, the same pattern
-#   `_lock_try_adopt` already used for exactly this reason. The previous
+#   act, no window -- true on every platform this file has been tested on,
+#   with one exception: Ubuntu 26.04 (ubuntu-latest) lost mutual exclusion
+#   outright, observed at rates up to 10/10 overlapping rounds (#1108). The
+#   mechanism is a hypothesis, not a measurement: a `mkdir` that reports
+#   success for a directory that already exists would produce exactly this
+#   symptom, and nothing ruling that hypothesis in or out was observed
+#   directly. `_lock_acquire_impl` below does not take `mkdir`'s return
+#   code as ownership on its own any more either way -- see the noclobber
+#   guard at its primary `mkdir` call, the same pattern `_lock_try_adopt`
+#   already used for exactly this reason. The previous
 #   `set -o noclobber` + `echo $$ >` acquisition had the right idea, but its
 #   *stale takeover* did not: `rm -f` (or a bare overwrite) followed by a
 #   create is two operations, and no amount of verification between or after
@@ -177,9 +181,21 @@ _lock_try_steal() {
         return 1
     fi
 
-    echo "$_LOCK_SELF" > "${_dir}/pid" 2>/dev/null || true
+    # A contender whose own `mkdir` falsely reported success (#1108 -- the
+    # Ubuntu 26.04 shape this file assumes) can write ITS pid into exactly
+    # this window: the rename above just left `${_dir}/pid` absent, and a
+    # lying `mkdir` lets a second process believe the empty path means it
+    # won. A plain `echo >` here would clobber that pid and both processes
+    # would hold the lock. `noclobber` is the same guard `_lock_try_adopt`
+    # already uses for its own pid write, below: whichever write lands
+    # first wins, and losing it is a failed steal, not a license to
+    # overwrite the real winner.
+    if ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null; then
+        rm -f "$_claim" 2>/dev/null || true
+        return 0
+    fi
     rm -f "$_claim" 2>/dev/null || true
-    return 0
+    return 1
 }
 
 # How long a lock directory with no pid and no claim must sit untouched before
@@ -273,7 +289,10 @@ _lock_try_adopt() {
     # clobbered that pid with a plain redirect.
     #
     # It does NOT make adoption safe against a *live* holder stalled between
-    # its `mkdir` and its own (plain, unguarded) pid write in `lock_acquire`.
+    # its `mkdir` and its own pid write in `lock_acquire` (noclobber-guarded
+    # since #1108, but that guard protects against a second writer landing
+    # in the same window -- it does nothing about the window itself still
+    # being open while the holder has not written anything yet).
     # Nothing here can: the two are indistinguishable from outside. That is
     # what _LOCK_ADOPT_AFTER is for, and the assumption it rests on is stated
     # above it — a holder writes its pid microseconds after `mkdir`, so
@@ -647,23 +666,33 @@ _lock_acquire_impl() {
             _lock_self_set
             # `mkdir`'s exit code was this file's whole exclusivity argument
             # (see the header) and on every platform tested before #1108
-            # that held: one syscall, no window. Measured false on Ubuntu
-            # 26.04 (#1108): `mkdir` reporting success for a directory that
-            # already existed, at rates up to 10/10 rounds -- every
-            # contender believed it alone had just created the directory.
-            # `noclobber` is the same O_EXCL-style guard `_lock_try_adopt`
-            # already uses below, for exactly this reason: it is bash's own
-            # open(2) flag, done by the shell itself, not an external
-            # binary, so it does not depend on `mkdir` -- or any other
-            # coreutils command -- being exclusive on the host.
+            # that held. Observed on Ubuntu 26.04 (#1108): mutual exclusion
+            # lost outright, at rates up to 10/10 overlapping rounds. The
+            # mechanism -- `mkdir` reporting success for a directory that
+            # already existed -- is a hypothesis this fix does not depend
+            # on confirming, not an independently measured fact. `noclobber`
+            # is the same O_EXCL-style guard `_lock_try_adopt` already uses
+            # below, for exactly this reason: it is bash's own open(2) flag,
+            # done by the shell itself, not an external binary, so it does
+            # not depend on `mkdir` -- or any other coreutils command --
+            # being exclusive on the host.
             if ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null; then
                 return 0
             fi
-            # Lost the pid race even though our own `mkdir` reported
-            # success too -- `mkdir` was not exclusive here. The real
-            # winner's pid is already in place; fall through to the same
-            # steal/adopt/wait path any other contender takes instead of
-            # returning 0 for a directory we do not actually hold alone.
+            if [ ! -e "${_dir}/pid" ]; then
+                # The write failed for a reason that is NOT another
+                # process winning the noclobber race -- permission denied,
+                # a disk quota, a fork limit -- so nobody holds this
+                # directory. Remove what we just created ourselves rather
+                # than leaving a pid-less orphan that blocks every later
+                # acquirer until the adoption threshold (#1108 review).
+                rmdir "$_dir" 2>/dev/null || true
+            fi
+            # Either someone else's write won the race genuinely (pid now
+            # present) or we just cleared our own failed attempt above --
+            # either way, fall through to the same steal/adopt/wait path
+            # any other contender takes instead of returning 0 for a
+            # directory we do not actually hold alone.
         fi
 
         if { [ -e "$_dir" ] || [ -L "$_dir" ]; } && [ ! -d "$_dir" ]; then

@@ -990,3 +990,118 @@ def test_an_adopter_that_exits_leaves_a_lock_the_next_contender_takes_over(tmp_p
         f"is the permanent outage #198 was filed for: {result.stdout} "
         f"{result.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #1108 review round 2 -- the fix above left two more spots that trusted a
+# write without the same noclobber guard, or fell through without checking
+# whether anyone actually won.
+# ---------------------------------------------------------------------------
+
+
+def test_a_stealer_refuses_a_pid_that_appears_after_its_rename_1108(tmp_path):
+    """#1108 review: a contender whose own `mkdir` falsely reported success
+    (the Ubuntu 26.04 shape this PR assumes) can write its own pid into the
+    exact window `_lock_try_steal` opens between renaming the dead holder's
+    pid away and writing its own new one. A plain `echo >` there would
+    clobber that contender's pid and both processes would believe they hold
+    the lock. The steal's final write must be `noclobber`-guarded, exactly
+    like `_lock_try_adopt`'s already is, and a stealer that loses this race
+    must leave the winner's pid alone -- a failed steal, not a clobber.
+
+    Deterministic, not concurrent: `cat` is overridden to inject the
+    intruding pid on its first read of the stealing claim file -- the exact
+    point between the rename and the write -- the same trick
+    test_an_adopter_refuses_a_pid_that_appears_after_its_guard above already
+    uses for the adoption path's analogous window.
+    """
+    lock_dir = tmp_path / "steal-race.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("999999", encoding="utf-8")
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _injected=0
+    cat() {{
+        case "$1" in
+            */pid.stealing.*)
+                if [ "$_injected" != 1 ]; then
+                    _injected=1
+                    echo 424242 > "{lock_dir}/pid"
+                fi
+                ;;
+        esac
+        command cat "$@"
+    }}
+    _lock_try_steal "{lock_dir}" && echo STOLE || echo REFUSED
+    """)
+    assert result.returncode == 0, result.stderr
+    assert "REFUSED" in result.stdout, (
+        f"a losing steal must not clobber the intruder's pid: {result.stdout} "
+        f"{result.stderr}"
+    )
+    assert (lock_dir / "pid").read_text().strip() == "424242", (
+        "a losing steal clobbered the pid a different contender had already "
+        "written -- the Ubuntu 26.04 shape hypothesised in #1108, where a "
+        "lying mkdir lets two processes believe they hold the same lock"
+    )
+    assert not list(lock_dir.glob("pid.stealing.*")), (
+        "a losing steal left its claim file behind, stranding litter"
+    )
+
+
+_READONLY_AFTER_MKDIR_SHIM = f"""#!/bin/sh
+{_REAL_MKDIR} "$@"
+rc=$?
+if [ $rc -eq 0 ] && [ "$1" != "-p" ]; then
+    chmod 0500 "$1" 2>/dev/null || true
+fi
+exit $rc
+"""
+
+
+def _readonly_after_mkdir_shim(tmp_path) -> Path:
+    """Install a `mkdir` that locks its own new directory read-only right
+    after creating it, so the pid write that follows fails for a reason
+    that is NOT another process winning the noclobber race (permission
+    denied, not EEXIST) -- nobody else ever writes a pid in this scenario.
+    """
+    bindir = tmp_path / "bin-readonly-after-mkdir"
+    bindir.mkdir()
+    shim = bindir / "mkdir"
+    shim.write_text(_READONLY_AFTER_MKDIR_SHIM, encoding="utf-8")
+    shim.chmod(0o755)
+    return bindir
+
+
+def test_a_non_race_pid_write_failure_does_not_strand_an_orphan_1108(tmp_path):
+    """#1108 review: a guarded pid write can fail for a reason that has
+    nothing to do with another process winning the noclobber race --
+    permission denied, a disk quota, a fork limit. If `lock_acquire` treats
+    every failed write as "someone else won" it leaves a pid-less directory
+    behind that nobody holds and nobody will ever release, blocking every
+    later acquirer until the adoption threshold (`_LOCK_ADOPT_AFTER`, 30s
+    by default) -- the exact permanent-outage shape #198 and #182 were
+    filed for, reintroduced one level up. `lock_acquire` must check whether
+    the pid now exists before falling through: if it does not, the write
+    failed for a non-race reason and the directory it just created must be
+    removed immediately rather than left as an orphan.
+    """
+    bindir = _readonly_after_mkdir_shim(tmp_path)
+    lock_dir = tmp_path / "noacc.lock"
+    result = _run(f"""
+    PATH="{bindir}:$PATH"
+    source {LIB_LOCK_SH}
+    lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+    """)
+    assert result.returncode == 0, result.stderr
+    assert "ACQUIRED" not in result.stdout, (
+        f"acquired despite a pid write that never happened: {result.stdout} "
+        f"{result.stderr}"
+    )
+    assert not lock_dir.exists(), (
+        f"a non-race pid-write failure left a pid-less orphan directory "
+        f"behind instead of cleaning it up -- every later acquirer would "
+        f"be blocked for the adoption threshold: {result.stdout} "
+        f"{result.stderr}"
+    )
