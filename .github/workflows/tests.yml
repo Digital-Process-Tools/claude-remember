@@ -39,6 +39,20 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.9", "3.10", "3.11", "3.12"]
+        # #1107: ubuntu-latest moved to Ubuntu 26.04, which has no prebuilt
+        # Python 3.9 x64 build for actions/setup-python -- observed failing
+        # at the "Set up Python 3.9" step with "The version '3.9' with
+        # architecture 'x64' was not found for Ubuntu 26.04." (PR #1105 job
+        # 127504329601, PR #1106 job 127520449349). Route that one cell onto
+        # ubuntu-24.04, which still ships it, rather than dropping 3.9 from
+        # the matrix: exclude the broken cross-product cell, then include
+        # its replacement explicitly.
+        exclude:
+          - os: ubuntu-latest
+            python-version: "3.9"
+        include:
+          - os: ubuntu-24.04
+            python-version: "3.9"
     steps:
       - uses: actions/checkout@v7
       - name: Fetch origin/main
