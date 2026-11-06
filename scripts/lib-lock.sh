@@ -240,7 +240,26 @@ _lock_read_pid_timeout() {
         else
             _max_iters=$(( _LOCK_PID_READ_TIMEOUT * 20 ))
         fi
-        while kill -0 "$_cat_pid" 2>/dev/null; do
+        # A `while kill -0 ...; do sleep; done` shape -- check first, sleep
+        # only if still alive -- makes the fast-path sleep-fork count
+        # RANDOM rather than zero or fixed: whether `$_cat_pid` already
+        # looks gone on the very first check depends on whether this
+        # watchdog or the main thread's own `wait` gets scheduled first,
+        # a race with no winner either side can force. A repo-wide
+        # fork-count test elsewhere (test_lock_timing.py, unrelated to
+        # this function, comparing a DIFFERENT feature's own marginal
+        # forks) went flaky from exactly this -- ~13% of runs, confirmed
+        # by direct repetition -- once this watchdog's own variable
+        # sleep count became noise riding on top of that comparison.
+        # Sleeping ONCE unconditionally before the first check fixes the
+        # fast-path cost at exactly one sleep fork, every time, which is
+        # what the ORIGINAL (reverted) single-sleep design already had by
+        # construction -- deterministic was never the problem with that
+        # design, only the orphan risk was.
+        while :; do
+            sleep "$_LOCK_SLEEP"
+            _iters=$(( _iters + 1 ))
+            kill -0 "$_cat_pid" 2>/dev/null || break
             if [ "$_iters" -ge "$_max_iters" ]; then
                 kill "$_cat_pid" 2>/dev/null || true
                 # Same SIGTERM-then-SIGKILL escalation the original fix
@@ -252,8 +271,6 @@ _lock_read_pid_timeout() {
                 kill -0 "$_cat_pid" 2>/dev/null && kill -9 "$_cat_pid" 2>/dev/null
                 break
             fi
-            sleep "$_LOCK_SLEEP"
-            _iters=$(( _iters + 1 ))
         done
     # `</dev/null >/dev/null 2>&1` here is still load-bearing: even
     # bounded to one short poll interval past the main thread's own
