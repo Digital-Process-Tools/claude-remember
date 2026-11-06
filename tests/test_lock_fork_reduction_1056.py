@@ -42,7 +42,7 @@ LIB_LOCK_SH = REPO_ROOT / "scripts" / "lib-lock.sh"
 def _run_vcs(args):
     """Thin subprocess wrapper, fixed cwd and capture, shared by every
     ref-resolution helper below."""
-    binary = "g" + "i" + "t"
+    binary = "git"
     return subprocess.run(
         [binary] + args, cwd=REPO_ROOT, capture_output=True, text=True, check=False,
     )
