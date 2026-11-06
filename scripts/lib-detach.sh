@@ -232,6 +232,79 @@ _remember_detach_windows() {
     return "$_rc"
 }
 
+# _remember_detach_windows_wsh_disabled: true when Windows Script Host
+# itself has been disabled by machine or user policy (HKLM/HKCU
+# \Software\Microsoft\Windows Script Host\Settings -> Enabled=0, a
+# common hardening setting -- #1104). wscript.exe does NOT fail silently
+# in that case: it raises a MODAL dialog ("Windows Script Host access is
+# disabled on this machine...") that stays on screen until clicked or
+# this file's own watchdog kills it, recurring every 5-60 minutes
+# depending on which verdict the cache below ends up publishing. Probing
+# the policy first, before ever invoking wscript.exe, avoids the dialog
+# outright rather than merely bounding how often it reappears.
+#
+# reg.exe missing (conceivable on a minimal Git Bash install) is treated
+# as "can't tell" -- return 1 (not disabled) immediately and let the
+# existing checks decide, same as before this function existed; this is
+# a strictly additive probe, never a new way to block the hidden route.
+#
+# HKLM is checked before HKCU, but this function does NOT implement real
+# HKLM/HKCU precedence -- it treats EITHER hive reporting Enabled=0 as
+# disabled, unconditionally (#1104 review round 2). A real-world host can
+# have HKLM Enabled=0 (machine policy) with HKCU Enabled=1 (the user
+# re-enabled WSH for themselves); several independent, long-standing,
+# non-Microsoft security/hardening sources (SANS ISC, "The 10
+# Commandments for Windows") describe a documented-by-convention
+# `IgnoreUserSettings` DWORD under the HKLM key that, when set to 1,
+# makes the machine value override a conflicting HKCU one -- implying
+# that WITHOUT it, HKCU's Enabled=1 actually wins and WSH still runs for
+# that user. CONFIRMED-NOT: no Microsoft-authored documentation (current
+# learn.microsoft.com, the TechNet archive Scripting Guide, or the Policy
+# CSP ADMX_Scripts reference) states this precedence rule or mentions
+# `IgnoreUserSettings` at all -- only that Enabled=0 can be set in either
+# hive, for either scope (TechNet archive, "Disabling Windows Script
+# Host", https://learn.microsoft.com/previous-versions/tn-archive/ee198684).
+# Implementing the community-described precedence on unconfirmed grounds
+# risks the opposite failure from #1104's own report: a WSH-working user
+# silently losing the hidden route and getting the flashing console every
+# save. So this function stays on the CONSERVATIVE side instead: any
+# Enabled=0 anywhere skips the hidden route, even in the one case where a
+# real host might have actually re-enabled WSH for that user via HKCU.
+#
+# MSYS2_ARG_CONV_EXCL='*' stops Git Bash's own argv-rewriting from
+# turning "/v" into a path before reg.exe ever sees it. Output is
+# trimmed of trailing \r (reg.exe is a native Windows tool; its output
+# is CRLF) before awk looks for the "Enabled" value line.
+#
+# ASSUMED, not verified against a real non-English-locale Windows host
+# (#1104 audit): the registry value NAME ("Enabled") and reg.exe's own
+# type token ("REG_DWORD") and hex-formatted value ("0x0") are stored/
+# token strings, not resource-string-translated UI text, so this
+# should hold regardless of the host's display language -- but no CI
+# leg runs a non-English Windows locale to confirm it.
+_remember_detach_windows_wsh_disabled() {
+    command -v reg.exe >/dev/null 2>&1 || return 1
+    local _wsh_path _wsh_val
+    for _wsh_path in 'HKLM\Software\Microsoft\Windows Script Host\Settings' \
+                      'HKCU\Software\Microsoft\Windows Script Host\Settings'; do
+        # #1104 review (MEDIUM): tolower($1) rather than a bare /Enabled/
+        # substring match -- reg.exe value NAMES are case-insensitive, so
+        # an admin-created lowercase "enabled" value still reports the
+        # policy. The accepted VALUES below cover both the REG_DWORD
+        # shape reg.exe prints ("0x0") and the REG_SZ shape a hardening
+        # guide commonly uses instead ("0") -- WSH itself honours either
+        # type for this value, so the probe must too.
+        _wsh_val=$(MSYS2_ARG_CONV_EXCL='*' reg.exe query "$_wsh_path" /v Enabled 2>/dev/null \
+            | tr -d '\r' | awk 'tolower($1) == "enabled" {print $NF}')
+        # if/[ ] rather than a case statement: this repo's own release-tree
+        # scanner (#898/#900) mis-parses `case` and blocks a release on it.
+        if [ "$_wsh_val" = "0x0" ] || [ "$_wsh_val" = "0" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 _remember_detach_windows_impl() {
     local outfile pidfile
     outfile="$1"
@@ -249,6 +322,7 @@ _remember_detach_windows_impl() {
     [ -f "$pidwrap" ] || return 1
     command -v wscript.exe >/dev/null 2>&1 || return 1
     command -v cygpath >/dev/null 2>&1 || return 1
+    _remember_detach_windows_wsh_disabled && return 1
 
     local vbs_win
     vbs_win="$(cygpath -w "$vbs" 2>/dev/null)" || return 1

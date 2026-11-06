@@ -315,6 +315,11 @@ NETWORK_WORD_ALLOWLIST = frozenset({
     "pipeline/shell.py", "pipeline/slug.py", "pipeline/spawn_guard.py", "pipeline/types.py",
     "scripts/agy-session-start-hook.sh", "scripts/agy-stop-hook.sh",
     "scripts/doctor.sh", "scripts/install_agy_hooks.py",
+    # #1104: "Host" here is the registry path literal
+    # 'HKLM\\...\\Windows Script Host\\Settings' -- the real name of the
+    # Windows Script Host policy key this plugin's own WSH-disabled probe
+    # reads, not a network tool.
+    "scripts/lib-detach.sh",
     "scripts/lib-env-cache.sh", "scripts/lib-lock.sh", "scripts/lib-memory-context.sh",
     "scripts/lib-staging-lock.sh", "scripts/log.sh", "scripts/post-tool-hook.sh",
     "scripts/resolve-paths.sh", "scripts/save-session.sh", "scripts/session-end-hook.sh",
