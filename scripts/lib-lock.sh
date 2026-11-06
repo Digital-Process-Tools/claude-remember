@@ -93,13 +93,18 @@
 #     read syscall rather than returning content or an error.
 #     `_lock_read_pid_timeout` bounds that read so it cannot consume a
 #     whole hook's own timeout budget. A read that does not complete in time
-#     is treated as "still held, try again later" -- NEVER as grounds to
-#     reclaim: a single timeout cannot tell a permanently stuck placeholder
-#     from a live holder's pid file that is merely slow to read once, and
-#     guessing wrong there would let an unrelated process steal or delete a
-#     lock a healthy holder still owns (#1103, found in this fix's own
-#     self-review). The fast timeout alone is still strictly better than the
-#     unbounded `cat` it replaces.
+#     is treated as "still held, try again later" -- a SINGLE timeout is
+#     never grounds to reclaim: it cannot tell a permanently stuck
+#     placeholder from a live holder's pid file that is merely slow to
+#     read once, and guessing wrong there would let an unrelated process
+#     steal or delete a lock a healthy holder still owns (#1103, found in
+#     this fix's own self-review). The fast timeout alone is still
+#     strictly better than the unbounded `cat` it replaces. A pid file
+#     that NEVER finishes reading is a different case, handled the same
+#     way a live-but-wedged holder already is: once the lock directory
+#     has sat untouched past `_LOCK_MAX_HOLD_SECONDS`, a later acquirer
+#     may take it over (`_lock_try_steal`'s own timed-out-read branch),
+#     a scheduler-measured follow-up to the original #1103 fix.
 
 [ -n "${_REMEMBER_LIB_LOCK_SOURCED:-}" ] && return 0
 _REMEMBER_LIB_LOCK_SOURCED=1
@@ -169,8 +174,26 @@ _LOCK_PID_READ_TIMEOUT="${REMEMBER_LOCK_PID_READ_TIMEOUT:-2}"
 # exactly the #1103 hang this file exists to close, just reopened by a bad
 # env var. Reject anything that is not digits-only and fall back to the
 # documented default instead of letting a typo silently undo the bound.
-[[ "$_LOCK_PID_READ_TIMEOUT" == *[!0-9]* ]] || [ -z "$_LOCK_PID_READ_TIMEOUT" ] &&
+#
+# `0` (or `00`) is digits-only but still rejected, separately: it sets
+# the watchdog's own bound to zero iterations, which kills a read that
+# is not yet done after the FIRST poll-sleep interval (~50ms) --
+# indistinguishable, under any real load, from killing a holder that
+# was about to finish normally. Worse, the SAME bound of zero applies
+# to the takeover path's post-rename re-read (above): a legitimate
+# fresh pid write can lose that race to its own zero-length grace
+# period, reporting a false timeout that lets a second contender treat
+# the just-written winner as still-stuck and take the lock away from
+# it -- two processes then believe they hold the same lock. `-lt 1`
+# (not `-le 0`) is the natural phrasing of "require at least one real
+# iteration"; `[ ]`'s own numeric comparison does not apply octal
+# rules (confirmed: a leading-zero value compares correctly here, only
+# the ARITHMETIC context below needs the `10#` forcing applied there).
+if [[ "$_LOCK_PID_READ_TIMEOUT" == *[!0-9]* ]] ||
+    [ -z "$_LOCK_PID_READ_TIMEOUT" ] ||
+    [ "$_LOCK_PID_READ_TIMEOUT" -lt 1 ]; then
     _LOCK_PID_READ_TIMEOUT=2
+fi
 
 # Read <pid-file> into $_LOCK_PID_READ_RESULT, bounded by
 # _LOCK_PID_READ_TIMEOUT seconds. Returns 0 once the read completes --
@@ -437,16 +460,22 @@ _lock_try_steal() {
         # AND the pid file still refuses to finish reading, treat it the
         # same as a wedged live holder and take it over.
         #
-        # Deliberately NEVER re-reads "${_dir}/pid" to get here -- it
-        # already timed out once above and would time out again, paying
-        # the same bound for nothing. There is also no content to verify
-        # against afterward (unlike the two branches below, which DID
-        # read real content and re-check it survived the rename): the
-        # single atomic `mv` below is the whole single-winner guarantee,
-        # the same one every other steal in this function already relies
-        # on -- of N contenders racing this same rename, exactly one can
-        # ever succeed, and the rest get ENOENT and fall through to
-        # return 1 below, unchanged from today.
+        # Deliberately NEVER re-reads the ORIGINAL "${_dir}/pid" to get
+        # here -- it already timed out once above and would time out
+        # again, paying the same bound for nothing. The atomic `mv`
+        # ALONE is not the whole single-winner guarantee here, though:
+        # unlike the two branches below (which read real content and
+        # re-check THAT survived the rename), this branch has no content
+        # to compare against, and self-review on this exact fix found a
+        # real race from skipping the check anyway -- a winner's own
+        # write recreates "${_dir}/pid" an instant after the rename, and
+        # a slower contender's `mv` can then grab that brand-new, healthy
+        # pid file with nothing yet telling it apart from the stuck
+        # placeholder it meant to steal (reproduced directly: 7 of 8
+        # concurrent contenders believed they won). The re-read below,
+        # of the CLAIM this rename just produced -- never the original
+        # path again -- is what actually closes that gap: see the
+        # comment right after the `mv`. Removing it reopens the race.
         [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_MAX_HOLD_SECONDS" ] || return 1
         mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
         # Confirmed by direct repro (N=8 concurrent contenders) that

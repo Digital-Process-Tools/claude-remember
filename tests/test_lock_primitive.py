@@ -639,10 +639,21 @@ def test_concurrent_takeover_of_a_permanently_dataless_pid_file_has_one_winner(
     may win the takeover -- the same single-winner guarantee
     `test_stale_takeover_has_exactly_one_winner` already pins for the
     confirmed-dead-holder case, now exercised for the never-finishes-
-    reading case this issue adds. The atomic `mv` of the pid file (never
-    re-read, since the source never finishes reading) is what the
-    guarantee rests on: of N racers, only one `mv` of the same source can
-    ever succeed.
+    reading case this issue adds.
+
+    The atomic `mv` of the pid file alone is NOT the whole guarantee
+    here, found by this exact test during development: a winner's own
+    pid write recreates the path an instant after its `mv`, and a
+    slower contender's `mv` can then grab that brand-new, healthy pid
+    file with nothing yet telling it apart from the stuck placeholder
+    it meant to steal -- reproduced directly as 7 of 8 contenders
+    "winning" before the fix. `_lock_try_steal` closes that by
+    re-reading the CLAIM the rename just produced (never the original
+    path again, since the original genuinely never finishes reading):
+    a real placeholder still times out identically on that re-read; a
+    fresh pid a faster winner already wrote resolves immediately, the
+    signal to restore it and refuse. This test is what the single-mv
+    comment next to that re-read in lib-lock.sh points back to.
     """
     lock_dir = tmp_path / "dataless-race.lock"
     lock_dir.mkdir()
@@ -755,6 +766,36 @@ def test_a_leading_zero_pid_read_timeout_is_read_as_decimal_not_octal(
         f"hang on an invalid-octal arithmetic error: "
         f"{result.stdout!r} {result.stderr!r}"
     )
+
+
+def test_a_zero_pid_read_timeout_falls_back_to_the_default():
+    """Scheduler finding: `0` (and `00`) is digits-only, so the validation
+    the two tests above pin lets it through -- but it sets the watchdog's
+    own bound to zero iterations, which kills a read not yet done after
+    the FIRST poll-sleep (~50ms), indistinguishable from killing a
+    holder that was about to finish normally. Worse, the SAME zero bound
+    applies to the takeover path's post-rename re-read: a legitimate
+    fresh pid write can lose that race to its own zero-length grace
+    period, which is a false-timeout report that lets a second
+    concurrent contender treat the just-written winner as still stuck
+    and take the lock away from it -- two processes then believe they
+    hold the same lock. `0`/`00` must fall back to the documented
+    default (2) the same as a non-digit value does.
+    """
+    for bad_value in ("0", "00"):
+        result = _run(
+            f"""
+            export REMEMBER_LOCK_PID_READ_TIMEOUT={bad_value}
+            source {LIB_LOCK_SH}
+            echo RESOLVED=$_LOCK_PID_READ_TIMEOUT
+            """,
+            timeout=10,
+        )
+        assert "RESOLVED=2" in result.stdout, (
+            f"REMEMBER_LOCK_PID_READ_TIMEOUT={bad_value!r} must fall back "
+            f"to the default of 2, not keep a zero bound: "
+            f"{result.stdout!r} {result.stderr!r}"
+        )
 
 
 def test_a_live_holder_is_never_stolen_from_even_when_its_pid_read_times_out(

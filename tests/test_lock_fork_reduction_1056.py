@@ -144,12 +144,26 @@ def test_uncontended_acquire_release_forks_cat_exactly_once_1101_1103(tmp_path):
     recorded = _uncontended_acquire_spawns(tmp_path)
     cats = [s for s in recorded if s.startswith("cat ")]
     expected = 1 if _bash_has_bashpid() else 3
+    # Computed OUTSIDE the f-string, not nested inside one: a conditional
+    # expression plus a same-quote-type string literal inside an f-string
+    # placeholder is PEP 701 syntax, accepted only by Python >=3.12 --
+    # this repo's own CI runs 3.9-3.11 too, and a 3.12-only f-string fails
+    # at COLLECTION with "SyntaxError: unterminated string literal",
+    # before any test in the file can even run (confirmed by direct repro
+    # with py_compile under 3.9/3.10/3.11).
+    if expected == 1:
+        why = (
+            "the bounded pid-file read alone, since $BASHPID makes "
+            "_lock_self_set a zero-fork path"
+        )
+    else:
+        why = (
+            "the bounded pid-file read plus one per _lock_self_set call "
+            "(acquire and release), since this bash has no $BASHPID"
+        )
     assert len(cats) == expected, (
         f"an uncontended acquire+release forked cat {len(cats)} times -- "
-        f"expected {expected} ({'the bounded pid-file read alone, since '
-        '$BASHPID makes _lock_self_set a zero-fork path' if expected == 1 else
-        'the bounded pid-file read plus one per _lock_self_set call (acquire '
-        'and release), since this bash has no $BASHPID'}): {cats}"
+        f"expected {expected} ({why}): {cats}"
     )
 
 
