@@ -11,9 +11,20 @@ must grow with it or it becomes the new, tighter bottleneck.
 Written before the fix: on the pre-fix workflow, step-level
 timeout-minutes is 25 and job-level is 30 for both the plain `pytest` job
 and the `hook-tests-compiled` job (which shares the identical values and
-explicitly cross-references the same reasoning in its own comments) --
-every assertion below that pins a larger value fails on that file, so
-this test cannot pass by the code doing nothing.
+explicitly cross-references the same reasoning in its own comments).
+
+Only test_pytest_job_step_timeout_has_real_macos_312_headroom actually
+pins a value the pre-fix file cannot satisfy (25 < MIN_STEP_TIMEOUT) --
+that is the one assertion this test cannot pass by the code doing
+nothing. The other three assertions describe relationships (job cap
+above step cap; hook-tests-compiled matching the plain pytest job) that
+already held pre-fix, since both jobs' values were already equal and the
+old job-step gap was already >= 5 minutes. They are kept anyway as
+regression guards: once the headroom fix lands, nothing else stops a
+later change from raising one job's timeout and leaving the other
+stale, or from shrinking the job/step gap back down -- these pin that
+relationship going forward even though they do not, by themselves,
+distinguish the pre-fix file from the fixed one.
 """
 
 from pathlib import Path

@@ -125,8 +125,14 @@ jobs:
         # twice on main (run 42282642194, jobs 128115350145 and
         # 128128937578), while the other three macOS legs passed with
         # only ~3 minutes of headroom to spare. 40 minutes gives 3.12 real
-        # margin without weakening the Windows-hang detection this timeout
-        # exists for.
+        # margin. This cap applies to every OS in the matrix, not just
+        # macOS 3.12 -- GitHub Actions has no per-matrix-cell override for
+        # timeout-minutes -- so a genuine Windows wscript.exe hang (#1014
+        # round 2) now takes up to 15 minutes longer to trip than before.
+        # Accepted: the other legs finish in ~22 minutes, nowhere near
+        # either the old or the new bound, so this only trades "a hang is
+        # caught fast" for "a hang is still caught, just not as fast" --
+        # it does not go undetected.
         timeout-minutes: 40
         shell: bash
         run: |
