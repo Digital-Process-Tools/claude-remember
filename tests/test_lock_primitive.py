@@ -759,7 +759,10 @@ def test_a_leading_zero_pid_read_timeout_is_read_as_decimal_not_octal(
         source {LIB_LOCK_SH}
         lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
         """,
-        timeout=15,
+        # 08 resolves to an 8-second read bound, and an acquire can pay it
+        # more than once; 15s left no headroom on a loaded macOS runner.
+        # The hang this pins is unbounded, so 40s still tells them apart.
+        timeout=40,
     )
     assert "REFUSED" in result.stdout, (
         f"a leading-zero timeout value must still refuse (bounded), not "
