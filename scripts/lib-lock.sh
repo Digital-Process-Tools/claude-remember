@@ -231,11 +231,16 @@ _lock_read_pid_timeout() {
             # that, escalate to SIGKILL, which nothing can ignore or block
             # short of the kernel's own I/O still being in flight -- and
             # even then this function must still return on schedule, so it
-            # does not `wait` for the kill to land either. The process is
-            # left for init to reap rather than for this function to wait
-            # on further.
+            # does not `wait` for the kill to land either (see the comment
+            # on the un-waited rm below for what that costs).
             sleep "$_LOCK_SLEEP"
             kill -0 "$_cat_pid" 2>/dev/null && kill -9 "$_cat_pid" 2>/dev/null
+            # Deliberately not waited on: the background job is still this
+            # shell's own child until this shell itself exits (SIGKILL does
+            # not reparent it to init on its own), so an un-waited kill here
+            # leaves a short-lived zombie entry in this process's own table
+            # rather than an immediately-reaped one -- a real, narrow cost,
+            # traded for never blocking this function past its own bound.
             rm -f "$_tmp" 2>/dev/null || true
             return 1
         fi
@@ -988,20 +993,41 @@ _lock_release_impl() {
     if ! mv "${_dir}/pid" "$_claim" 2>/dev/null; then
         return 1
     fi
-    # A plain builtin read here, not another bounded _lock_read_pid_timeout
-    # call: $_claim is the SAME file the read at the top of this function
-    # already proved readable microseconds ago (just renamed, not freshly
-    # encountered), so the #1103 dataless-placeholder hazard that read
-    # exists to bound does not reapply to it -- and a second bounded call
-    # here would otherwise double this function's own fork count on every
-    # single release, undoing the saving finding 4 made.
+    # Two different takeovers can land in this window, and each needs a
+    # different check -- a second-review finding on the first cut of this
+    # fix, which only had the first of the two below and broke the very
+    # steal-vs-release test it was meant to pin, because the two checks
+    # catch opposite timings, not the same one twice.
+    #
+    # A STEALER rewrites "${_dir}/pid" BEFORE this mv has a chance to run:
+    # whichever of this release's mv or the stealer's own mv of
+    # "${_dir}/pid" is issued first still wins the PATH, but if the
+    # stealer's rename-then-rewrite completed first, the content this mv
+    # just carried into $_claim is the STEALER's pid, not the one this
+    # function read at the top -- compare against $_pid to catch that.
     _seen=$(<"$_claim") 2>/dev/null
     if [ "$_seen" != "$_pid" ]; then
-        # The pid file no longer holds what we read moments ago -- a
-        # stealer already won the race and rewrote it. Restore what we
-        # actually took (the new owner's claim, not our stale belief) and
-        # refuse rather than destroying a lock we no longer own.
+        # $_claim now holds whatever this mv actually captured -- the
+        # stealer's own pid, since the stealer's write landed in
+        # "${_dir}/pid" before this mv ran. "${_dir}/pid" is absent right
+        # now (this mv just took the only thing that was there), so
+        # restoring $_claim's real content is what puts the new owner's
+        # pid back where it belongs -- never our own stale belief, which
+        # is why this restores $_claim unmodified rather than writing
+        # $_pid.
         mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        return 1
+    fi
+    # An ADOPTER creates a BRAND NEW "${_dir}/pid" AFTER this mv, from
+    # nothing: _lock_try_adopt fires whenever "${_dir}/pid" is ABSENT and
+    # the directory is old enough, both true for the whole window this mv
+    # just opened (a stale-but-alive holder's age already exceeds the
+    # adopt threshold in any sane configuration). A content compare can
+    # never see this -- nothing we hold changes when someone else creates
+    # a different file -- so check existence instead: if it exists again,
+    # someone else's pid is there now, and it is theirs to keep.
+    if [ -e "${_dir}/pid" ]; then
+        rm -f "$_claim" 2>/dev/null || true
         return 1
     fi
     rm -f "$_claim" 2>/dev/null || true

@@ -947,6 +947,82 @@ def test_release_of_an_owned_uncontended_lock_still_succeeds(tmp_path):
     )
 
 
+def test_release_does_not_destroy_a_lock_a_concurrent_adopter_just_won(tmp_path):
+    """Self-review (round 2) finding: the finding-3 fix above only re-checks
+    against a concurrent STEALER by comparing a content snapshot that can
+    never actually change (the rename target only this process ever
+    touches), which happens to still work because the rename to
+    pid.releasing.* and a stealer's own rename of ${_dir}/pid are racing
+    for the SAME source path, and whichever `mv` lands first simply makes
+    the other's `mv` fail outright. What that compare does NOT catch is a
+    concurrent ADOPTER: _lock_try_adopt fires whenever ${_dir}/pid is
+    ABSENT and the directory is old enough -- both true for the entire
+    window this release's own rename just opened (a stale-but-alive
+    holder's age already exceeds the adopt threshold in any sane
+    configuration), and an adopter creates a BRAND NEW ${_dir}/pid from
+    nothing, which a compare against our own untouched claim file can
+    never see. The fix checks whether ${_dir}/pid exists again instead.
+
+    Deterministic, not concurrent: `mv` is overridden to run a real
+    _lock_try_adopt in a subshell immediately AFTER release's own `mv`
+    of ${_dir}/pid actually completes -- the precise moment ${_dir}/pid
+    becomes absent, which is exactly the window _lock_try_adopt needs to
+    see. Overriding _lock_self_set (as the steal-race test above does)
+    would fire too early here: that call happens BEFORE release's own
+    rename, while ${_dir}/pid still holds the stale holder's own pid, so
+    an adopter running there would simply see the pid file present and
+    correctly refuse -- never a meaningful race at all.
+    """
+    lock_dir = tmp_path / "race-release-adopt.lock"
+    lock_dir.mkdir()
+    adopter_id_path = tmp_path / "adopter_id.txt"
+    adopt_rc_path = tmp_path / "adopt.rc"
+    script = f"""
+    source {LIB_LOCK_SH}
+    _LOCK_MAX_HOLD_SECONDS=0
+    _LOCK_ADOPT_AFTER=0
+    echo "$$" > "{lock_dir}/pid"
+    _MV_FIRED=0
+    mv() {{
+        command mv "$@"
+        local _rc=$?
+        if [ "$_MV_FIRED" != 1 ] && [ "$1" = "{lock_dir}/pid" ]; then
+            _MV_FIRED=1
+            (
+                _lock_try_adopt "{lock_dir}" >/dev/null 2>&1
+                echo $? > "{adopt_rc_path}"
+                echo "${{BASHPID:-$$}}" > "{adopter_id_path}"
+            )
+        fi
+        return $_rc
+    }}
+    lock_release "{lock_dir}"
+    echo "release_rc=$?"
+    """
+    result = _run(script)
+    assert result.returncode == 0, result.stderr
+    assert "release_rc=1" in result.stdout, (
+        f"a release racing a concurrent adopter that already won must "
+        f"refuse, not report success: {result.stdout!r} {result.stderr!r}"
+    )
+    assert adopt_rc_path.read_text().strip() == "0", (
+        f"the concurrent adopter itself must have won for this to be a "
+        f"meaningful test of the race, not a vacuous pass: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert lock_dir.exists(), (
+        "the stale holder's release destroyed the lock directory the "
+        "concurrent adopter had already taken over"
+    )
+    adopter_id = adopter_id_path.read_text().strip()
+    pid_file = lock_dir / "pid"
+    pid_now = pid_file.read_text().strip() if pid_file.exists() else "<missing>"
+    assert pid_now == adopter_id, (
+        f"the pid file no longer holds the adopter's own pid ({adopter_id!r}) "
+        f"after the stale holder's release ran -- got {pid_now!r}"
+    )
+
+
 def test_release_failure_in_an_exit_trap_is_survivable(tmp_path):
     """Both callers release from an EXIT trap under `set -e`.
 
