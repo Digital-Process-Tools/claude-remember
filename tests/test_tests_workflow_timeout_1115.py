@@ -36,7 +36,9 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "tests.yml"
 
 # A real macOS 3.12 run needs roughly 28 minutes; the old 25-minute step cap
 # left no room for that at all, and the old 30-minute job cap left only
-# ~2 extra minutes beyond the step cap for checkout/setup/upload overhead.
+# ~2 extra minutes beyond that real 28-minute runtime (30 - 28 = 2) for
+# checkout/setup/upload overhead -- not beyond the step cap itself, which
+# had a full 5-minute gap (30 - 25 = 5) that was never the tight part.
 # Both must grow, and the job cap must stay comfortably above the step cap.
 MIN_STEP_TIMEOUT = 35
 MIN_JOB_TIMEOUT_OVER_STEP = 5
