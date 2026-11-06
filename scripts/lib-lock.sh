@@ -232,7 +232,7 @@ _lock_read_pid_timeout() {
             # short of the kernel's own I/O still being in flight -- and
             # even then this function must still return on schedule, so it
             # does not `wait` for the kill to land either (see the comment
-            # on the un-waited rm below for what that costs).
+            # on the un-waited kill below for what that costs).
             sleep "$_LOCK_SLEEP"
             kill -0 "$_cat_pid" 2>/dev/null && kill -9 "$_cat_pid" 2>/dev/null
             # Deliberately not waited on: the background job is still this
