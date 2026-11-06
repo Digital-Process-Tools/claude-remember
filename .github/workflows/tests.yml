@@ -31,9 +31,16 @@ jobs:
     # whole job indefinitely (a blocking UI prompt on a headless runner,
     # never resolving on its own) rather than failing the one test that
     # triggered it -- a bounded job timeout turns that into a fast, loud
-    # failure instead of a silent multi-hour hold. 30 minutes is well above
-    # the slowest leg's own observed full-suite runtime.
-    timeout-minutes: 30
+    # failure instead of a silent multi-hour hold.
+    # #1115: 30 minutes was NOT well above every leg's own runtime -- the
+    # macOS 3.12 leg needs roughly 28 minutes on its own and timed out
+    # twice on main (run 42282642194, jobs 128115350145 and 128128937578),
+    # while the other three macOS legs passed with only ~3 minutes of
+    # headroom left under the old 25-minute step cap. 45 minutes keeps a
+    # real ~5-minute gap over the step-level cap below (now 40 minutes)
+    # for checkout/setup/upload overhead, without being so large that a
+    # genuine hang goes undetected for most of an hour.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -113,7 +120,14 @@ jobs:
         # top of that: whatever reached the log file before the step ends
         # is uploaded as an artifact below under `if: always()`, rather
         # than depending only on the step's own captured output surviving.
-        timeout-minutes: 25
+        # #1115: 25 minutes left the macOS 3.12 leg no room at all -- it
+        # needs roughly 28 minutes on its own and hit this exact limit
+        # twice on main (run 42282642194, jobs 128115350145 and
+        # 128128937578), while the other three macOS legs passed with
+        # only ~3 minutes of headroom to spare. 40 minutes gives 3.12 real
+        # margin without weakening the Windows-hang detection this timeout
+        # exists for.
+        timeout-minutes: 40
         shell: bash
         run: |
           set -o pipefail
@@ -158,8 +172,10 @@ jobs:
     # #1002 round 2: same reasoning as the plain pytest job's own
     # timeout-minutes above -- this job runs the identical real-wscript
     # tests against the compiled hooks, so it is exposed to the same
-    # hang risk.
-    timeout-minutes: 30
+    # hang risk. #1115: moved in lockstep with the plain pytest job's own
+    # value for the same reason -- same suite, same macOS 3.12 wall-clock
+    # time.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -193,8 +209,10 @@ jobs:
         run: python .github/scripts/compile_hooks.py --repo . --apply
       - name: Run the full suite against the compiled hooks
         # Same #1014-round-2 reasoning as the plain pytest job's own "Run
-        # tests" step above.
-        timeout-minutes: 25
+        # tests" step above. #1115: moved in lockstep with that step's own
+        # value for the same reason -- same suite, same macOS 3.12
+        # wall-clock time.
+        timeout-minutes: 40
         shell: bash
         run: |
           set -o pipefail
