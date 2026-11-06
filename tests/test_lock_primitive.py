@@ -587,6 +587,176 @@ def test_an_unreadable_pid_file_is_refused_quickly_rather_than_hanging(
     )
 
 
+def test_a_permanently_dataless_pid_file_becomes_acquirable_once_old_enough(
+    tmp_path,
+):
+    """Scheduler finding: the test above pins that a SINGLE timed-out read
+    must never be grounds to steal -- correct, since one timeout cannot
+    tell a merely-slow read from a permanently broken one. But refusing
+    EVERY read forever, with no recovery path at all, means a pid file
+    that genuinely never finishes reading (the actual #1103 shape -- a
+    dataless cloud-sync placeholder whose remote copy is gone for good)
+    makes `_lock_try_steal` refuse FOREVER: every later `lock_acquire`
+    times out at this exact point and logs "another save holds the lock,
+    skipping" permanently, just after 2s instead of ~60s (#1103 was made
+    faster, not fixed). This pins the recovery path: once the lock
+    directory is at least as old as `_LOCK_MAX_HOLD_SECONDS` AND the pid
+    file still refuses to finish reading, a later acquirer takes it over.
+    `REMEMBER_LOCK_MAX_HOLD_SECONDS=0` makes any real age qualify, the
+    same trick `test_a_live_but_permanently_hung_holder_is_eventually_
+    stolen_from` above already uses for the live-holder case.
+    """
+    lock_dir = tmp_path / "dataless-recoverable.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+    result = _run(
+        f"""
+        export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
+        export REMEMBER_LOCK_PID_READ_TIMEOUT=1
+        source {LIB_LOCK_SH}
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """,
+        timeout=15,
+    )
+    assert "ACQUIRED" in result.stdout, (
+        f"a permanently dataless pid file old enough to exceed "
+        f"_LOCK_MAX_HOLD_SECONDS must eventually become acquirable -- "
+        f"a timeout is not forever proof the holder is alive: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    new_pid = (lock_dir / "pid").read_text(encoding="utf-8").strip()
+    assert new_pid.isdigit(), (
+        f"the takeover must leave a real, numeric pid behind, not the "
+        f"FIFO or something else: {new_pid!r}"
+    )
+
+
+def test_concurrent_takeover_of_a_permanently_dataless_pid_file_has_one_winner(
+    tmp_path,
+):
+    """Safety counterpart to the test above: of N contenders that all see
+    the same permanently-stuck, old-enough pid file at once, exactly one
+    may win the takeover -- the same single-winner guarantee
+    `test_stale_takeover_has_exactly_one_winner` already pins for the
+    confirmed-dead-holder case, now exercised for the never-finishes-
+    reading case this issue adds. The atomic `mv` of the pid file (never
+    re-read, since the source never finishes reading) is what the
+    guarantee rests on: of N racers, only one `mv` of the same source can
+    ever succeed.
+    """
+    lock_dir = tmp_path / "dataless-race.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+    events_file = tmp_path / "events.log"
+    n = 8
+    result = _run(
+        f"""
+        export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
+        export REMEMBER_LOCK_PID_READ_TIMEOUT=1
+        source {LIB_LOCK_SH}
+        contend() {{
+            if _lock_try_steal "{lock_dir}"; then
+                echo "STOLE $1" >> "{events_file}"
+            else
+                echo "REFUSED $1" >> "{events_file}"
+            fi
+        }}
+        for i in $(seq 1 {n}); do
+            contend "$i" &
+        done
+        wait
+        """,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = events_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == n, (
+        f"expected exactly {n} outcomes, one per contender: {lines!r}"
+    )
+    wins = [line for line in lines if line.startswith("STOLE")]
+    assert len(wins) == 1, (
+        f"exactly one of {n} concurrent takeovers of the same stuck pid "
+        f"file must win -- got {len(wins)}: {lines!r}"
+    )
+    new_pid = (lock_dir / "pid").read_text(encoding="utf-8").strip()
+    assert new_pid.isdigit(), (
+        f"after the race, the pid file must hold a real numeric pid, "
+        f"not be left empty or dataless: {new_pid!r}"
+    )
+
+
+def test_a_non_integer_pid_read_timeout_still_bounds_the_read(tmp_path):
+    """Scheduler finding: `REMEMBER_LOCK_PID_READ_TIMEOUT=0.5` (or `2s`, or
+    any value with a non-digit character) reaches `_max_iters=$((
+    _LOCK_PID_READ_TIMEOUT * 20 ))` in the watchdog as a bash arithmetic
+    error, which exits that subshell immediately -- before it ever sends
+    the SIGTERM that is this whole bound's only way of waking a blocked
+    `cat` on a dataless pid file. The read, and the caller's blocking
+    `wait` on it, becomes unbounded again: the exact #1103 hang this file
+    exists to close, reopened by a single bad env var. Confirmed by direct
+    repro before writing this test: both bash 3.2 and a newer bash hang
+    past 15s on the pre-fix code for this exact FIFO. A digits-only
+    validation with a fallback to the documented default (2) closes it.
+    """
+    lock_dir = tmp_path / "badtimeout.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+    result = _run(
+        f"""
+        export REMEMBER_LOCK_PID_READ_TIMEOUT=0.5
+        source {LIB_LOCK_SH}
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        echo RESOLVED=$_LOCK_PID_READ_TIMEOUT
+        """,
+        timeout=15,
+    )
+    assert "REFUSED" in result.stdout, (
+        f"a non-integer timeout override must still refuse (bounded) "
+        f"rather than hang: {result.stdout!r} {result.stderr!r}"
+    )
+    assert "RESOLVED=2" in result.stdout, (
+        f"a non-digit override must fall back to the documented default "
+        f"of 2, not silently keep the bad value: {result.stdout!r}"
+    )
+
+
+def test_a_leading_zero_pid_read_timeout_is_read_as_decimal_not_octal(
+    tmp_path,
+):
+    """A sibling trap to the test above: `"08"` is digits-only (passes the
+    validation that test pins) but is an INVALID octal literal once bash's
+    `$(( ))` arithmetic context sees the leading zero -- the same
+    "arithmetic error exits before ever sending SIGTERM" failure, one
+    validation layer deeper. `10#$_LOCK_PID_READ_TIMEOUT` forces base 10
+    at the one place this value is used in arithmetic, matching the
+    `10#$_mtime` convention `_lock_dir_age` already uses for the same
+    reason. Confirmed by direct repro that this specific value (not `0.5`
+    or `2s`, both already covered above) hangs without that forcing --
+    unlike `01` through `07`, `08` and `09` are not valid octal digits at
+    all, so this is the smallest leading-zero value that actually
+    diverges between "read as decimal" (8) and "rejected by bash's own
+    arithmetic as an invalid base-8 literal" (a hard error, not merely a
+    different number) -- an earlier draft of this test used `03`, which
+    happens to read the same both ways and silently tested nothing.
+    """
+    lock_dir = tmp_path / "octaltimeout.lock"
+    lock_dir.mkdir()
+    os.mkfifo(lock_dir / "pid")
+    result = _run(
+        f"""
+        export REMEMBER_LOCK_PID_READ_TIMEOUT=08
+        source {LIB_LOCK_SH}
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """,
+        timeout=15,
+    )
+    assert "REFUSED" in result.stdout, (
+        f"a leading-zero timeout value must still refuse (bounded), not "
+        f"hang on an invalid-octal arithmetic error: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+
+
 def test_a_live_holder_is_never_stolen_from_even_when_its_pid_read_times_out(
     tmp_path,
 ):

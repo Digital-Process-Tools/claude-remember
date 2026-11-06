@@ -161,6 +161,16 @@ _LOCK_MAX_HOLD_SECONDS="${REMEMBER_LOCK_MAX_HOLD_SECONDS:-1800}"
 # unbounded, that single read consumes a whole PostToolUse hook's own
 # timeout budget.
 _LOCK_PID_READ_TIMEOUT="${REMEMBER_LOCK_PID_READ_TIMEOUT:-2}"
+# A non-integer override (`0.5`, `2s`, empty-but-set) reaches `_max_iters=$((
+# _LOCK_PID_READ_TIMEOUT * 20 ))` in the watchdog below as a bash arithmetic
+# error, which exits that subshell on the spot -- before it ever sends the
+# SIGTERM that is this whole bound's only way of waking a blocked `cat` --
+# leaving the read, and the caller's blocking `wait` on it, unbounded again:
+# exactly the #1103 hang this file exists to close, just reopened by a bad
+# env var. Reject anything that is not digits-only and fall back to the
+# documented default instead of letting a typo silently undo the bound.
+[[ "$_LOCK_PID_READ_TIMEOUT" == *[!0-9]* ]] || [ -z "$_LOCK_PID_READ_TIMEOUT" ] &&
+    _LOCK_PID_READ_TIMEOUT=2
 
 # Read <pid-file> into $_LOCK_PID_READ_RESULT, bounded by
 # _LOCK_PID_READ_TIMEOUT seconds. Returns 0 once the read completes --
@@ -177,7 +187,19 @@ _LOCK_PID_READ_TIMEOUT="${REMEMBER_LOCK_PID_READ_TIMEOUT:-2}"
 # A SIGTERM to a process blocked in a slow read() interrupts the syscall and
 # ends the process (no handler is installed for it), which is what actually
 # unblocks the background job here -- not a cooperative check the blocked
-# `cat` could ever perform itself.
+# `cat` could ever perform itself. This covers the dataless-placeholder
+# case #1103 was filed for (a File Provider read that blocks for ~60s,
+# then gives up) and a reader that ignores SIGTERM but can still be
+# reached by SIGKILL. It does NOT cover a read truly stuck in an
+# UNINTERRUPTIBLE kernel sleep (D state -- a wedged NFS mount, a broken
+# FUSE driver): no signal, including SIGKILL, is delivered to a process
+# until that syscall itself returns, which is a kernel-level condition no
+# userspace watchdog can force. `wait "$_cat_pid"` below has no bound of
+# its own for exactly that reason, and would block for as long as the
+# read does -- rare enough on a local pid file that this file does not
+# attempt to work around it (reasoned, not reproduced: inducing a real D
+# state needs a wedged filesystem, which this test suite cannot
+# construct), same as every caller already accepted before #1101/#1103.
 _lock_read_pid_timeout() {
     local _file="$1" _tmp _cat_pid _watchdog_pid _rc _max_iters _iters=0
     _LOCK_PID_READ_RESULT=""
@@ -238,7 +260,14 @@ _lock_read_pid_timeout() {
         if [ "$_LOCK_SLEEP" = 1 ]; then
             _max_iters="$_LOCK_PID_READ_TIMEOUT"
         else
-            _max_iters=$(( _LOCK_PID_READ_TIMEOUT * 20 ))
+            # 10# forces base 10 -- a value like "08" is digits-only (the
+            # validation above lets it through) but an invalid OCTAL
+            # literal once bash's arithmetic context sees the leading
+            # zero, which is the same "exits before ever sending SIGTERM"
+            # failure as the non-digit case above, just one validation
+            # layer deeper (10#$_mtime below uses the same guard for the
+            # same reason).
+            _max_iters=$(( 10#$_LOCK_PID_READ_TIMEOUT * 20 ))
         fi
         # A `while kill -0 ...; do sleep; done` shape -- check first, sleep
         # only if still alive -- makes the fast-path sleep-fork count
@@ -264,9 +293,16 @@ _lock_read_pid_timeout() {
                 kill "$_cat_pid" 2>/dev/null || true
                 # Same SIGTERM-then-SIGKILL escalation the original fix
                 # had: a reader that ignores SIGTERM (reproduced directly
-                # with a shim that traps and ignores TERM) or is
-                # genuinely stuck in an uninterruptible read must not
-                # hang this watchdog's own kill indefinitely either.
+                # with a shim that traps and ignores TERM) is reached by
+                # SIGKILL instead. A reader truly stuck in an
+                # UNINTERRUPTIBLE kernel read is a different case this
+                # escalation cannot reach either way -- no signal lands
+                # on it until the syscall itself returns -- but this
+                # watchdog's OWN poll loop still returns on schedule
+                # regardless, since `kill` never blocks on its target;
+                # only the main thread's later `wait "$_cat_pid"` would
+                # still be stuck on such a reader, see the note above
+                # this function.
                 sleep "$_LOCK_SLEEP"
                 kill -0 "$_cat_pid" 2>/dev/null && kill -9 "$_cat_pid" 2>/dev/null
                 break
@@ -386,6 +422,56 @@ _lock_try_steal() {
         # Refuse and let the caller retry rather than steal on a guess; the
         # fast timeout alone is still strictly better than the unbounded
         # `cat` this replaces, which could block an entire hook's budget.
+        #
+        # Refusing FOREVER, however, is its own outage: a pid file that
+        # NEVER finishes reading (the actual #1103 shape -- a dataless
+        # placeholder whose remote copy is gone for good, not merely a
+        # holder that was slow once) would make every later acquirer time
+        # out at this exact point, forever, with "another save holds the
+        # lock, skipping" logged after 2s instead of ~60s but just as
+        # permanently (scheduler-measured follow-up: #1103 was faster,
+        # not fixed). The SAME age bound that already lets a later
+        # acquirer take over a live-but-wedged holder (`kill -0` succeeds
+        # forever, below) applies here too: once the lock directory
+        # itself has sat untouched for at least _LOCK_MAX_HOLD_SECONDS
+        # AND the pid file still refuses to finish reading, treat it the
+        # same as a wedged live holder and take it over.
+        #
+        # Deliberately NEVER re-reads "${_dir}/pid" to get here -- it
+        # already timed out once above and would time out again, paying
+        # the same bound for nothing. There is also no content to verify
+        # against afterward (unlike the two branches below, which DID
+        # read real content and re-check it survived the rename): the
+        # single atomic `mv` below is the whole single-winner guarantee,
+        # the same one every other steal in this function already relies
+        # on -- of N contenders racing this same rename, exactly one can
+        # ever succeed, and the rest get ENOENT and fall through to
+        # return 1 below, unchanged from today.
+        [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_MAX_HOLD_SECONDS" ] || return 1
+        mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
+        # Confirmed by direct repro (N=8 concurrent contenders) that
+        # skipping this check lets 7 of 8 believe they won: this winner's
+        # own noclobber write below RECREATES "${_dir}/pid", and a slower
+        # contender's `mv` (racing on the SAME path, not the content) can
+        # then grab that brand-new, perfectly healthy pid file an instant
+        # after it was written, with nothing yet telling it apart from
+        # the stuck placeholder it meant to grab. Re-reading from the
+        # CLAIM this rename just produced -- never the original path
+        # again -- tells the two apart cheaply: a genuine stuck FIFO
+        # (rename preserves the underlying special file, not the
+        # content) still times out identically; a fresh pid some faster
+        # winner already wrote resolves immediately, which is this
+        # contender's signal that it grabbed someone else's win by
+        # mistake and must hand it back rather than overwrite it.
+        if _lock_read_pid_timeout "$_claim"; then
+            mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+            return 1
+        fi
+        if ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null; then
+            rm -f "$_claim" 2>/dev/null || true
+            return 0
+        fi
+        rm -f "$_claim" 2>/dev/null || true
         return 1
     fi
 
