@@ -2118,12 +2118,21 @@ def test_a_fast_failing_claim_reread_does_not_steal_a_racing_winners_pid_1122(
             export REMEMBER_LOCK_PID_READ_TIMEOUT=1
             source {LIB_LOCK_SH}
             eval "$(declare -f _lock_file_inode | sed '1s/^_lock_file_inode ()/_orig_lock_file_inode ()/')"
-            _swap_done=0
+            # A plain shell variable will NOT do for the once-only guard
+            # below: `_lock_file_inode` is always called via command
+            # substitution ($(...)) at its real call sites in lib-lock.sh,
+            # which forks a subshell, and a variable set inside that
+            # subshell is gone the instant the subshell exits -- so
+            # `_swap_done=1` would never be visible to the next call and
+            # the swap would fire on EVERY call, not just the first. A
+            # file on disk survives across subshells; a variable does not.
+            _swap_marker="{lock_dir}/.swap-done"
+            rm -f "$_swap_marker"
             _lock_file_inode() {{
                 local _result
                 _result=$(_orig_lock_file_inode "$@")
-                if [ "$_swap_done" -eq 0 ]; then
-                    _swap_done=1
+                if [ ! -e "$_swap_marker" ]; then
+                    touch "$_swap_marker"
                     # Simulate a faster contender's own win landing in the
                     # gap between THIS contender's pre-mv snapshot (just
                     # taken, above, of the file as it stood a moment ago)
