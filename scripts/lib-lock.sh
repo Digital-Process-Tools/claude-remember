@@ -26,6 +26,56 @@ _lock_self_set() {
     return 0
 }
 
+_LOCK_MAX_HOLD_SECONDS="${REMEMBER_LOCK_MAX_HOLD_SECONDS:-1800}"
+
+_LOCK_PID_READ_TIMEOUT="${REMEMBER_LOCK_PID_READ_TIMEOUT:-2}"
+if [[ "$_LOCK_PID_READ_TIMEOUT" == *[!0-9]* ]] ||
+    [ -z "$_LOCK_PID_READ_TIMEOUT" ] ||
+    [ "$_LOCK_PID_READ_TIMEOUT" -lt 1 ]; then
+    _LOCK_PID_READ_TIMEOUT=2
+fi
+
+_lock_read_pid_timeout() {
+    local _file="$1" _tmp _cat_pid _watchdog_pid _rc _max_iters _iters=0
+    _LOCK_PID_READ_RESULT=""
+    _tmp=$(mktemp "${TMPDIR:-/tmp}/remember-pidread-XXXXXX" 2>/dev/null) || {
+        _LOCK_PID_READ_RESULT=$(cat "$_file" 2>/dev/null) || true
+        return 0
+    }
+    ( cat "$_file" > "$_tmp" 2>/dev/null ) </dev/null &
+    _cat_pid=$!
+    (
+        if [ "$_LOCK_SLEEP" = 1 ]; then
+            _max_iters="$_LOCK_PID_READ_TIMEOUT"
+        else
+            _max_iters=$(( 10#$_LOCK_PID_READ_TIMEOUT * 20 ))
+        fi
+        while :; do
+            sleep "$_LOCK_SLEEP"
+            _iters=$(( _iters + 1 ))
+            kill -0 "$_cat_pid" 2>/dev/null || break
+            if [ "$_iters" -ge "$_max_iters" ]; then
+                kill "$_cat_pid" 2>/dev/null || true
+                sleep "$_LOCK_SLEEP"
+                kill -0 "$_cat_pid" 2>/dev/null && kill -9 "$_cat_pid" 2>/dev/null
+                break
+            fi
+        done
+    ) </dev/null >/dev/null 2>&1 &
+    _watchdog_pid=$!
+    disown "$_watchdog_pid" 2>/dev/null || true
+    wait "$_cat_pid" 2>/dev/null
+    _rc=$?
+    kill "$_watchdog_pid" 2>/dev/null || true
+    if [ "$_rc" -ge 128 ]; then
+        rm -f "$_tmp" 2>/dev/null || true
+        return 1
+    fi
+    { _LOCK_PID_READ_RESULT=$(<"$_tmp"); } 2>/dev/null || true
+    rm -f "$_tmp" 2>/dev/null || true
+    return 0
+}
+
 _lock_try_steal() {
     local _dir="$1" _pid _seen _abandoned _owner _claim
     _lock_self_set
@@ -45,22 +95,47 @@ _lock_try_steal() {
         done
     fi
 
-    _pid=$(cat "${_dir}/pid" 2>/dev/null) || true
+    if _lock_read_pid_timeout "${_dir}/pid"; then
+        _pid="$_LOCK_PID_READ_RESULT"
+    else
+        [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_MAX_HOLD_SECONDS" ] || return 1
+        mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
+        if _lock_read_pid_timeout "$_claim"; then
+            mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+            return 1
+        fi
+        if ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null; then
+            rm -f "$_claim" 2>/dev/null || true
+            return 0
+        fi
+        rm -f "$_claim" 2>/dev/null || true
+        return 1
+    fi
 
-    [ -n "$_pid" ] && [[ "$_pid" != *[!0-9]* ]] || return 1
-    kill -0 "$_pid" 2>/dev/null && return 1
+    if [ -z "$_pid" ] || [[ "$_pid" == *[!0-9]* ]]; then
+        [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_ADOPT_AFTER" ] || return 1
+    elif kill -0 "$_pid" 2>/dev/null; then
+        [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_MAX_HOLD_SECONDS" ] || return 1
+    fi
 
     mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
 
-    _seen=$(cat "$_claim" 2>/dev/null) || true
+    if ! _lock_read_pid_timeout "$_claim"; then
+        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        return 1
+    fi
+    _seen="$_LOCK_PID_READ_RESULT"
     if [ "$_seen" != "$_pid" ]; then
         mv "$_claim" "${_dir}/pid" 2>/dev/null || true
         return 1
     fi
 
-    echo "$_LOCK_SELF" > "${_dir}/pid" 2>/dev/null || true
+    if ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null; then
+        rm -f "$_claim" 2>/dev/null || true
+        return 0
+    fi
     rm -f "$_claim" 2>/dev/null || true
-    return 0
+    return 1
 }
 
 _LOCK_ADOPT_AFTER="${_LOCK_ADOPT_AFTER:-30}"
@@ -291,8 +366,12 @@ _lock_acquire_impl() {
     while :; do
         if mkdir "$_dir" 2>/dev/null; then
             _lock_self_set
-            echo "$_LOCK_SELF" > "${_dir}/pid" 2>/dev/null || true
-            return 0
+            if ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null; then
+                return 0
+            fi
+            if [ ! -e "${_dir}/pid" ]; then
+                rmdir "$_dir" 2>/dev/null || true
+            fi
         fi
 
         if { [ -e "$_dir" ] || [ -L "$_dir" ]; } && [ ! -d "$_dir" ]; then
@@ -336,13 +415,32 @@ lock_release() {
 }
 
 _lock_release_impl() {
-    local _dir="$1" _pid
-    _pid=$(cat "${_dir}/pid" 2>/dev/null) || true
+    local _dir="$1" _pid _claim _seen
+    if _lock_read_pid_timeout "${_dir}/pid"; then
+        _pid="$_LOCK_PID_READ_RESULT"
+    else
+        return 1
+    fi
 
     _lock_self_set
     if [ -n "$_pid" ] && [ "$_pid" != "$_LOCK_SELF" ]; then
         return 1
     fi
+
+    _claim="${_dir}/pid.releasing.${_LOCK_SELF}"
+    if ! mv "${_dir}/pid" "$_claim" 2>/dev/null; then
+        return 1
+    fi
+    { _seen=$(<"$_claim"); } 2>/dev/null || true
+    if [ "$_seen" != "$_pid" ]; then
+        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        return 1
+    fi
+    if [ -e "${_dir}/pid" ]; then
+        rm -f "$_claim" 2>/dev/null || true
+        return 1
+    fi
+    rm -f "$_claim" 2>/dev/null || true
     rm -rf "$_dir" 2>/dev/null || true
     return 0
 }

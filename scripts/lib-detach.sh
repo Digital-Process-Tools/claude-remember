@@ -83,6 +83,20 @@ _remember_detach_windows() {
     return "$_rc"
 }
 
+_remember_detach_windows_wsh_disabled() {
+    command -v reg.exe >/dev/null 2>&1 || return 1
+    local _wsh_path _wsh_val
+    for _wsh_path in 'HKLM\Software\Microsoft\Windows Script Host\Settings' \
+                      'HKCU\Software\Microsoft\Windows Script Host\Settings'; do
+        _wsh_val=$(MSYS2_ARG_CONV_EXCL='*' reg.exe query "$_wsh_path" /v Enabled 2>/dev/null \
+            | tr -d '\r' | awk 'tolower($1) == "enabled" {print $NF}')
+        if [ "$_wsh_val" = "0x0" ] || [ "$_wsh_val" = "0" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 _remember_detach_windows_impl() {
     local outfile pidfile
     outfile="$1"
@@ -100,6 +114,7 @@ _remember_detach_windows_impl() {
     [ -f "$pidwrap" ] || return 1
     command -v wscript.exe >/dev/null 2>&1 || return 1
     command -v cygpath >/dev/null 2>&1 || return 1
+    _remember_detach_windows_wsh_disabled && return 1
 
     local vbs_win
     vbs_win="$(cygpath -w "$vbs" 2>/dev/null)" || return 1
