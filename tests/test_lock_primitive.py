@@ -1898,3 +1898,172 @@ def test_a_non_race_pid_write_failure_does_not_strand_an_orphan_1108(tmp_path):
         f"be blocked for the adoption threshold: {result.stdout} "
         f"{result.stderr}"
     )
+
+
+def _chmod_unreadable_skip_reason() -> str:
+    """chmod 000 does not make a file unreadable for root (and the CI
+    runners for this suite are never root, but a local run as root would
+    silently turn a fast-fail read into a successful one, which is the
+    exact distinction these tests exist to pin)."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return "chmod 000 does not block root from reading a file"
+    return ""
+
+
+def test_a_fast_failing_pid_read_does_not_steal_from_a_live_holder(tmp_path):
+    """#1119, regression in e704ea2 (#1101/#1103): `_lock_read_pid_timeout`
+    only reports a failure when the watchdog kills a HUNG read (`wait`
+    returning >=128). A `cat` that fails FAST instead (EACCES, EIO, a
+    cloud-sync placeholder that errors rather than hangs) returned 0 with
+    EMPTY content -- indistinguishable from a genuinely empty-and-old pid
+    file -- so `_lock_try_steal` stole the lock from a LIVE holder once the
+    lock directory aged past `_LOCK_ADOPT_AFTER` (30s), instead of refusing
+    the way a hung read already does. `chmod 000` makes `cat` fail fast
+    with EACCES rather than hang, the same shape as the trap.d-logged
+    repro for this issue (live `sleep` holder, lock dir 60s old, pid file
+    unreadable)."""
+    reason = _chmod_unreadable_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    lock_dir = tmp_path / "fast-fail-live.lock"
+    lock_dir.mkdir()
+    holder = subprocess.Popen(["sleep", "30"])
+    pid_file = lock_dir / "pid"
+    try:
+        pid_file.write_text(str(holder.pid), encoding="utf-8")
+        pid_file.chmod(0o000)
+        old_time = time.time() - 60
+        os.utime(lock_dir, (old_time, old_time))
+
+        result = _run(f"""
+        source {LIB_LOCK_SH}
+        _LOCK_ADOPT_AFTER=30
+        _LOCK_MAX_HOLD_SECONDS=1800
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """)
+        assert "REFUSED" in result.stdout, (
+            f"a fast-failing pid read must never be treated as a confirmed "
+            f"empty pid file -- a live holder's lock was stolen out from "
+            f"under it: {result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        pid_file.chmod(0o644)
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_a_readable_pid_of_a_live_holder_is_the_positive_control_1119(tmp_path):
+    """Positive control for the test above, same ages and bounds: with the
+    pid file left READABLE, the same live holder must still refuse a
+    steal -- proving this harness genuinely exercises the steal-vs-refuse
+    decision rather than passing because nothing in the scenario would
+    ever have been stolen regardless."""
+    lock_dir = tmp_path / "readable-live.lock"
+    lock_dir.mkdir()
+    holder = subprocess.Popen(["sleep", "30"])
+    try:
+        (lock_dir / "pid").write_text(str(holder.pid), encoding="utf-8")
+        old_time = time.time() - 60
+        os.utime(lock_dir, (old_time, old_time))
+
+        result = _run(f"""
+        source {LIB_LOCK_SH}
+        _LOCK_ADOPT_AFTER=30
+        _LOCK_MAX_HOLD_SECONDS=1800
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """)
+        assert "REFUSED" in result.stdout, (
+            f"a live holder's readable pid must still refuse a steal: "
+            f"{result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_a_persistently_unreadable_pid_is_still_recoverable_once_old_enough_1119(
+    tmp_path,
+):
+    """#1119 fix direction: a fast-failing read must be refused like a
+    hung one, never treated as confirmed-empty -- but #1103's own
+    recovery must still work for a pid file that persistently cannot be
+    read: once the lock directory is at least as old as
+    `_LOCK_MAX_HOLD_SECONDS`, it is still reclaimable, the same recovery
+    path a permanently-hanging read already has
+    (test_a_permanently_dataless_pid_file_becomes_acquirable_once_old_enough).
+    Without this, refusing a fast-fail read forever would trade a security
+    regression for a permanent, unrecoverable outage."""
+    reason = _chmod_unreadable_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    lock_dir = tmp_path / "fast-fail-recoverable.lock"
+    lock_dir.mkdir()
+    pid_file = lock_dir / "pid"
+    pid_file.write_text("424242", encoding="utf-8")
+    pid_file.chmod(0o000)
+    try:
+        result = _run(f"""
+        export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
+        source {LIB_LOCK_SH}
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """)
+        assert "ACQUIRED" in result.stdout, (
+            f"a persistently unreadable pid file old enough to exceed "
+            f"_LOCK_MAX_HOLD_SECONDS must still be recoverable -- a fast "
+            f"read failure must not be refused FOREVER either: "
+            f"{result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        pid_file.chmod(0o644)
+
+
+def test_a_fast_failing_pid_read_via_the_mktemp_fallback_also_refuses_1119(
+    tmp_path,
+):
+    """Self-review follow-up to #1119: `_lock_read_pid_timeout`'s own
+    mktemp-failure fallback (taken when `mktemp` itself cannot create a
+    scratch file -- a full or unwritable TMPDIR) had the EXACT SAME bug the
+    main fix just closed, in its own separate branch: it unconditionally
+    `return 0`-ed regardless of whether the direct `cat` it falls back to
+    actually succeeded, discarding `cat`'s own exit status via `|| true`.
+    A fast-failing pid file reached through this corner (TMPDIR unusable
+    AND the pid file itself unreadable) would still read as confirmed-
+    empty and be stealable from a live holder after only
+    `_LOCK_ADOPT_AFTER` (30s) rather than `_LOCK_MAX_HOLD_SECONDS` (1800s).
+    Forces the fallback the same way
+    test_release_of_an_owned_lock_still_works_when_mktemp_is_unusable
+    already does (TMPDIR pointed at a 0o000 directory), combined with the
+    same chmod-000 pid file the main #1119 test uses."""
+    reason = _chmod_unreadable_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    lock_dir = tmp_path / "mktemp-unusable-fast-fail.lock"
+    unusable_tmpdir = tmp_path / "no-mktemp-here-1119"
+    unusable_tmpdir.mkdir(mode=0o000)
+    lock_dir.mkdir()
+    holder = subprocess.Popen(["sleep", "30"])
+    pid_file = lock_dir / "pid"
+    try:
+        pid_file.write_text(str(holder.pid), encoding="utf-8")
+        pid_file.chmod(0o000)
+        old_time = time.time() - 60
+        os.utime(lock_dir, (old_time, old_time))
+
+        result = _run(f"""
+        export TMPDIR="{unusable_tmpdir}"
+        source {LIB_LOCK_SH}
+        _LOCK_ADOPT_AFTER=30
+        _LOCK_MAX_HOLD_SECONDS=1800
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """)
+        assert "REFUSED" in result.stdout, (
+            f"a fast-failing pid read reached through the mktemp-failure "
+            f"fallback must never be treated as a confirmed empty pid file "
+            f"either -- a live holder's lock was stolen out from under it: "
+            f"{result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        pid_file.chmod(0o644)
+        unusable_tmpdir.chmod(0o755)
+        holder.terminate()
+        holder.wait(timeout=10)
