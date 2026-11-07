@@ -447,19 +447,31 @@ _lock_read_pid_timeout() {
 }
 
 # Hand a claim file back to the lock's pid path without clobbering a pid
-# some OTHER process already wrote there in the meantime (#1124). Reads
-# the claim's own content back and writes it with `noclobber`, giving the
-# restore the same atomicity the real steal writes already have below.
-# Falls back to a plain `mv` only if the claim's content cannot even be
-# read back.
+# some OTHER process already wrote there in the meantime (#1124). $3, when
+# given, is content the CALLER already read back from $_claim -- never
+# re-read here. Self-review found two problems with an earlier version
+# that always re-read: every call site had ALREADY attempted its own read
+# of $_claim before reaching here, so re-reading inside this function paid
+# the full read-timeout bound a SECOND time on exactly the path where the
+# first read already failed -- the common case, since an unreadable pid is
+# the whole reason #1101/#1103/#1119/#1120 exist. And its "could not read
+# back" fallback was a bare, unguarded `mv` -- precisely the clobbering
+# pattern the noclobber write below exists to close, left open whenever
+# content could not be read, which is the common case too. Both are fixed
+# by making "no known content" and "write already found something there"
+# converge on the SAME guarded restore path below.
 _lock_handback() {
-    local _claim="$1" _dir="$2" _content
-    if _lock_read_pid_timeout "$_claim"; then
-        _content="$_LOCK_PID_READ_RESULT"
-        if ( set -o noclobber; echo "$_content" > "${_dir}/pid" ) 2>/dev/null; then
-            rm -f "$_claim" 2>/dev/null || true
-            return 0
-        fi
+    local _claim="$1" _dir="$2" _content="${3:-}" _write_ok=1
+    if [ -z "$_content" ]; then
+        _write_ok=0
+    elif ! ( set -o noclobber; echo "$_content" > "${_dir}/pid" ) 2>/dev/null; then
+        _write_ok=0
+    fi
+    if [ "$_write_ok" = 1 ]; then
+        rm -f "$_claim" 2>/dev/null || true
+        return 0
+    fi
+    if [ -e "${_dir}/pid" ]; then
         rm -f "$_claim" 2>/dev/null || true
         return 1
     fi
@@ -478,18 +490,44 @@ _lock_handback() {
 # back on every steal attempt forever -- reopening #1103's own outage
 # with the very check meant to prevent a different bug.
 #
-# Probed with a throwaway file IN <dir> itself so the answer is for the
-# exact filesystem the steal is about to run on. Only reached from inside
-# a steal attempt, already paying for a multi-second read timeout above
-# it, and never on the uncontended acquire path, which never calls
-# _lock_try_steal at all.
+# NOT probed inside <dir> itself (self-review finding, #1124): creating,
+# renaming or removing ANY directory entry updates that directory's own
+# mtime, and _lock_dir_age -- the staleness clock every caller of this
+# function is in the middle of consulting -- is exactly <dir>'s mtime.
+# Reproduced directly: sourcing this file, writing a pid, waiting 2s, then
+# calling this probe against that same directory reset `_lock_dir_age` from
+# 2 back to 0 -- the probe was resetting the very clock _lock_try_steal
+# relies on to ever judge the lock stale at all, letting a permanently
+# stuck lock look freshly touched on every single steal attempt and never
+# age far enough to be reclaimed (the #1101/#1103 outage this whole file
+# exists to close, reopened by this probe's own side effect). Probed in
+# <dir>'s PARENT instead: creating/renaming/removing an entry in the
+# parent updates the PARENT's own mtime, never <dir>'s, and the parent is
+# the same filesystem <dir> sits on in every layout this file assumes.
+#
+# Only reached from inside a steal attempt, already paying for a
+# multi-second read timeout above it, and never on the uncontended acquire
+# path, which never calls _lock_try_steal at all.
 #
 # A probe that itself fails to create or rename answers false -- the safe
 # default: it disables a check this contender cannot even confirm works,
 # rather than trusting metadata that was never verified meaningful here.
+# A process killed between creating the probe below and this function's own
+# `rm -f` cleanup leaves a leftover ".steal-probe.$pid" (or its ".moved"
+# sibling) behind permanently -- nothing here sweeps a dead owner's old
+# probe the way the pid.stealing.* claims above are swept. Accepted rather
+# than reaped (#1124 self-review): the probe now lives in <dir>'s PARENT,
+# which may hold many unrelated lock directories' own debris, so a correct
+# sweep needs care not to touch another lock's files -- and the leftover
+# is harmless to correctness, since nothing ever reads it and a clean
+# release's `rm -rf "$_dir"` does not reach it either, being a sibling of
+# $_dir rather than inside it. Same shape as the pid-recycling limitation
+# documented near the top of this file: logged rather than solved here.
 _lock_rename_preserves_identity() {
-    local _dir="$1" _probe _moved _i1 _i2
-    _probe="${_dir}/.steal-probe.${_LOCK_SELF}"
+    local _dir="$1" _parent _probe _moved _i1 _i2
+    _parent="${_dir%/*}"
+    [ "$_parent" = "$_dir" ] && _parent="."
+    _probe="${_parent}/.steal-probe.${_LOCK_SELF}"
     _moved="${_probe}.moved"
     rm -f "$_probe" "$_moved" 2>/dev/null || true
     ( umask 077; : > "$_probe" ) 2>/dev/null || return 1
@@ -624,7 +662,7 @@ _lock_try_steal() {
         # contender's signal that it grabbed someone else's win by
         # mistake and must hand it back rather than overwrite it.
         if _lock_read_pid_timeout "$_claim"; then
-            _lock_handback "$_claim" "$_dir"
+            _lock_handback "$_claim" "$_dir" "$_LOCK_PID_READ_RESULT"
             return 1
         fi
         # #1122: the re-read above failing is NOT by itself proof that
@@ -735,7 +773,7 @@ _lock_try_steal() {
     fi
     _seen="$_LOCK_PID_READ_RESULT"
     if [ "$_seen" != "$_pid" ]; then
-        _lock_handback "$_claim" "$_dir"
+        _lock_handback "$_claim" "$_dir" "$_seen"
         return 1
     fi
 

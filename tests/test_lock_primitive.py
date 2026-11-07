@@ -2265,6 +2265,94 @@ def test_a_persistently_unreadable_pid_still_steals_when_rename_does_not_preserv
     )
 
 
+def test_identity_probe_does_not_reset_the_lock_directory_staleness_clock_1124(
+    tmp_path,
+):
+    """#1124 self-review (Explore reviewer, finding 1):
+    `_lock_rename_preserves_identity`'s own throwaway probe must not live
+    inside the lock directory it is answering for -- creating, renaming
+    or removing ANY entry in a directory updates that directory's own
+    mtime, which is exactly what `_lock_dir_age` reads to decide staleness
+    everywhere in this file. A probe inside <dir> would reset the clock on
+    every single steal attempt, letting a permanently stuck lock look
+    freshly touched forever and never age far enough to be reclaimed --
+    the #1101/#1103 outage reopened by the very helper meant to avoid a
+    different one. Probing in <dir>'s parent instead must leave <dir>'s
+    own mtime untouched.
+    """
+    lock_dir = tmp_path / "probe-mtime.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("999999", encoding="utf-8")
+    old_time = time.time() - 120
+    os.utime(lock_dir, (old_time, old_time))
+    result = _run(
+        f"""
+        source {LIB_LOCK_SH}
+        _lock_self_set
+        echo "before=$(_lock_dir_age "{lock_dir}")"
+        _lock_rename_preserves_identity "{lock_dir}" >/dev/null 2>&1
+        echo "after=$(_lock_dir_age "{lock_dir}")"
+        """,
+        timeout=15,
+    )
+    stdout = result.stdout
+    before = int(stdout.split("before=")[1].split()[0])
+    after = int(stdout.split("after=")[1].split()[0])
+    assert before >= 100, (
+        f"the harness itself is broken if the pre-probe age was not "
+        f"already ~120s old: {stdout!r} {result.stderr!r}"
+    )
+    assert after >= 100, (
+        f"_lock_rename_preserves_identity's own throwaway probe must not "
+        f"touch the LOCK DIRECTORY's mtime -- creating/renaming/removing "
+        f"a directory entry updates that directory's own mtime, and "
+        f"_lock_dir_age reads exactly that, so probing inside the lock "
+        f"directory itself resets the staleness clock every later steal "
+        f"attempt on this same lock relies on, letting a permanently "
+        f"stuck lock look freshly touched forever (reopens #1101/#1103): "
+        f"before={before} after={after} {stdout!r} {result.stderr!r}"
+    )
+
+
+def test_handback_never_clobbers_a_pid_another_process_legitimately_wrote(
+    tmp_path,
+):
+    """Self-review of #1124 (oss:auditor finding): `_lock_handback`'s whole
+    purpose is to restore a claim without clobbering a pid some OTHER
+    process already wrote to "${_dir}/pid" in the meantime. Exercises the
+    noclobber write directly, with readable content AND a destination that
+    already holds a different, legitimate pid -- the one branch nothing in
+    the original diff's own tests drove down. The write must decline, the
+    real pid must survive untouched, and the claim must still be dropped
+    rather than left as litter.
+    """
+    lock_dir = tmp_path / "handback-no-clobber.lock"
+    lock_dir.mkdir()
+    claim = lock_dir / "pid.stealing.999999"
+    claim.write_text("111111", encoding="utf-8")
+    (lock_dir / "pid").write_text("222222", encoding="utf-8")
+    result = _run(
+        f"""
+        source {LIB_LOCK_SH}
+        _lock_handback "{claim}" "{lock_dir}" "111111"
+        """,
+        timeout=15,
+    )
+    assert result.stdout == "", (
+        f"unexpected stdout from a hand-back: {result.stdout!r} "
+        f"{result.stderr!r}"
+    )
+    assert (lock_dir / "pid").read_text(encoding="utf-8") == "222222", (
+        f"a hand-back must never overwrite a pid another process "
+        f"legitimately holds, even when the restoring content is known "
+        f"and readable: {(lock_dir / 'pid').read_text(encoding='utf-8')!r}"
+    )
+    assert not claim.exists(), (
+        "a hand-back that correctly declined to restore must still drop "
+        "its own claim file rather than leave it as litter"
+    )
+
+
 def test_a_persistently_unreadable_claim_with_no_race_still_steals_1122(
     tmp_path,
 ):
