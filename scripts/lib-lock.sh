@@ -449,7 +449,7 @@ _lock_read_pid_timeout() {
 # Take a stale lock away from a dead holder. Returns 0 only for the single
 # process that won the rename — everyone else gets 1 and keeps waiting.
 _lock_try_steal() {
-    local _dir="$1" _pid _seen _abandoned _owner _claim
+    local _dir="$1" _pid _seen _abandoned _owner _claim _pre_steal_inode _claim_inode
     # Per-process, NOT a shared name: with one `pid.stealing` for everyone, a
     # second process could "restore" a claim that was still in flight and then
     # claim it itself, and both would proceed. Two winners at N=8, reproducibly.
@@ -530,6 +530,12 @@ _lock_try_steal() {
         # path again -- is what actually closes that gap: see the
         # comment right after the `mv`. Removing it reopens the race.
         [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_MAX_HOLD_SECONDS" ] || return 1
+        # Captured BEFORE the rename, not derived from it: `stat` reads
+        # metadata only, so this still answers even though the content read
+        # above just failed. This is the "before" half of the #1122 check
+        # below -- what we are ABOUT to grab, independent of whether we can
+        # read what is inside it.
+        _pre_steal_inode=$(_lock_file_inode "${_dir}/pid")
         mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
         # Confirmed by direct repro (N=8 concurrent contenders) that
         # skipping this check lets 7 of 8 believe they won: this winner's
@@ -546,6 +552,36 @@ _lock_try_steal() {
         # contender's signal that it grabbed someone else's win by
         # mistake and must hand it back rather than overwrite it.
         if _lock_read_pid_timeout "$_claim"; then
+            mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+            return 1
+        fi
+        # #1122: the re-read above failing is NOT by itself proof that
+        # $_claim is still the genuinely stuck placeholder it looked like
+        # before the rename -- #1119/#1120 made EVERY read failure here
+        # (a real timeout, or a fast EACCES/EIO/cloud-sync refusal) report
+        # identically as "1", so a fast-failing re-read of a faster
+        # winner's brand-new pid -- grabbed by exactly the same-path race
+        # the comment above describes, just landing on content this
+        # contender cannot read for an unrelated, transient reason -- is
+        # read exactly like a confirmed-still-stuck placeholder and falls
+        # through to steal below. That reopens the identical "confirmed
+        # empty" mistake #1119 already closed at the FIRST read, one call
+        # site over, and lets this contender clobber a winner's lock,
+        # producing two simultaneous holders.
+        #
+        # Compare inode, not content: rename preserves the underlying
+        # inode, so $_claim's inode equals whatever this contender is
+        # ACTUALLY holding right now, and `_lock_file_inode` needs no read
+        # permission on that file's content to answer, unlike
+        # `_lock_read_pid_timeout`. A match means nothing was swapped in
+        # between the capture above and this rename -- genuinely the same
+        # file whose first read already failed too, consistent with a
+        # placeholder that is still stuck, and safe to steal. A mismatch,
+        # or either inode lookup itself coming back empty, is exactly the
+        # ambiguity #1119/#1120 already decided must refuse rather than
+        # guess: hand back.
+        _claim_inode=$(_lock_file_inode "$_claim")
+        if [ -z "$_pre_steal_inode" ] || [ -z "$_claim_inode" ] || [ "$_pre_steal_inode" != "$_claim_inode" ]; then
             mv "$_claim" "${_dir}/pid" 2>/dev/null || true
             return 1
         fi
@@ -661,6 +697,36 @@ _lock_dir_age() {
     _now=$(date +%s)
     # 10# after the case, never instead of it (#332).
     echo $(( _now - 10#$_mtime ))
+}
+
+# Inode of <path>, or empty if it cannot be determined. `stat` needs no
+# permission on the file's own CONTENT -- only search permission on its
+# containing directory -- so this still answers for a file this process
+# cannot `cat` (#1122): the whole point of using it in _lock_try_steal to
+# tell "still the same file" from "silently swapped for a different one"
+# without caring whether either is readable.
+#
+# Same BSD-vs-GNU `stat` split as _lock_dir_age above, and the exact same
+# #198 gotcha applies to `%i`: GNU's `-f` means FILESYSTEM status, not file
+# status, and its own `%i` under that mode is "free inodes on the
+# filesystem" -- a large, plausible-looking, completely unrelated digit
+# string that the naive digits-only guard would otherwise accept as a real
+# inode number. Captured separately, exactly like the mtime case, so `-f`
+# is only ever tried once `-c` has already failed outright (true on BSD,
+# where `-c` is not a valid flag at all) rather than once `-c` has produced
+# a wrong-but-numeric answer.
+#
+# No timeout wrapper around this `stat`, unlike `_lock_read_pid_timeout`:
+# reasoned, not reproduced -- a metadata-only syscall does not block on the
+# same "data never arrives" shape an actual read of a FIFO or a dataless
+# placeholder can (#1101/#1103), so this file does not pay for a bound it
+# has no observed need for.
+_lock_file_inode() {
+    local _inode
+    _inode=$(stat -c %i "$1" 2>/dev/null) || _inode=""
+    [ -n "$_inode" ] && [[ "$_inode" != *[!0-9]* ]] || _inode=$(stat -f %i "$1" 2>/dev/null) || _inode=""
+    [ -n "$_inode" ] && [[ "$_inode" != *[!0-9]* ]] || { _inode=""; }
+    echo "$_inode"
 }
 
 # Adopt a lock directory that has no pid at all. A holder killed between
