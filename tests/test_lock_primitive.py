@@ -2139,9 +2139,32 @@ def test_a_fast_failing_claim_reread_does_not_steal_a_racing_winners_pid_1122(
                     # and the `mv` that is about to run next: a legitimate
                     # winner's pid, which ALSO happens to fail fast to read
                     # right now -- #1122's own shape, not #1119's hang.
-                    rm -f "{lock_dir}/pid"
-                    printf '%s' "{winner_pid_text}" > "{lock_dir}/pid"
-                    chmod 000 "{lock_dir}/pid"
+                    #
+                    # Built via mktemp + mv, never rm-then-create in place:
+                    # on a bitmap allocator (ext4's behaviour, observed on
+                    # the ubuntu-24.04/py3.9 CI leg -- this exact test went
+                    # STOLE there despite being green on this machine's
+                    # APFS, 2000/2000 rm+recreate trials showing zero
+                    # collisions locally), freeing an inode and immediately
+                    # creating a new file in the same directory can hand
+                    # back that SAME inode number, with nothing else
+                    # allocated in between to prevent it. That collision
+                    # makes the real fix's own inode comparison below see
+                    # "unchanged" for a file that was, in fact, swapped --
+                    # the exact ambiguity this test exists to force, except
+                    # forced onto the test's own harness instead of the
+                    # code under test. Creating the replacement under a
+                    # temp name WHILE the original "pid" file still exists
+                    # (not yet unlinked) guarantees the temp file gets an
+                    # inode distinct from the original's -- two live files
+                    # cannot share one inode -- and `mv` then carries that
+                    # already-distinct inode into place atomically, so the
+                    # swap is observably different by construction, not by
+                    # allocator luck.
+                    _winner_tmp=$(mktemp "{lock_dir}/.winner-pid.XXXXXX")
+                    printf '%s' "{winner_pid_text}" > "$_winner_tmp"
+                    chmod 000 "$_winner_tmp"
+                    mv -f "$_winner_tmp" "{lock_dir}/pid"
                 fi
                 echo "$_result"
             }}
