@@ -2015,3 +2015,55 @@ def test_a_persistently_unreadable_pid_is_still_recoverable_once_old_enough_1119
         )
     finally:
         pid_file.chmod(0o644)
+
+
+def test_a_fast_failing_pid_read_via_the_mktemp_fallback_also_refuses_1119(
+    tmp_path,
+):
+    """Self-review follow-up to #1119: `_lock_read_pid_timeout`'s own
+    mktemp-failure fallback (taken when `mktemp` itself cannot create a
+    scratch file -- a full or unwritable TMPDIR) had the EXACT SAME bug the
+    main fix just closed, in its own separate branch: it unconditionally
+    `return 0`-ed regardless of whether the direct `cat` it falls back to
+    actually succeeded, discarding `cat`'s own exit status via `|| true`.
+    A fast-failing pid file reached through this corner (TMPDIR unusable
+    AND the pid file itself unreadable) would still read as confirmed-
+    empty and be stealable from a live holder after only
+    `_LOCK_ADOPT_AFTER` (30s) rather than `_LOCK_MAX_HOLD_SECONDS` (1800s).
+    Forces the fallback the same way
+    test_release_of_an_owned_lock_still_works_when_mktemp_is_unusable
+    already does (TMPDIR pointed at a 0o000 directory), combined with the
+    same chmod-000 pid file the main #1119 test uses."""
+    reason = _chmod_unreadable_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    lock_dir = tmp_path / "mktemp-unusable-fast-fail.lock"
+    unusable_tmpdir = tmp_path / "no-mktemp-here-1119"
+    unusable_tmpdir.mkdir(mode=0o000)
+    lock_dir.mkdir()
+    holder = subprocess.Popen(["sleep", "30"])
+    pid_file = lock_dir / "pid"
+    try:
+        pid_file.write_text(str(holder.pid), encoding="utf-8")
+        pid_file.chmod(0o000)
+        old_time = time.time() - 60
+        os.utime(lock_dir, (old_time, old_time))
+
+        result = _run(f"""
+        export TMPDIR="{unusable_tmpdir}"
+        source {LIB_LOCK_SH}
+        _LOCK_ADOPT_AFTER=30
+        _LOCK_MAX_HOLD_SECONDS=1800
+        lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
+        """)
+        assert "REFUSED" in result.stdout, (
+            f"a fast-failing pid read reached through the mktemp-failure "
+            f"fallback must never be treated as a confirmed empty pid file "
+            f"either -- a live holder's lock was stolen out from under it: "
+            f"{result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        pid_file.chmod(0o644)
+        unusable_tmpdir.chmod(0o755)
+        holder.terminate()
+        holder.wait(timeout=10)

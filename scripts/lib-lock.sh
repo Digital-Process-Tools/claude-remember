@@ -248,8 +248,26 @@ _lock_read_pid_timeout() {
         # Falling back to a direct, unbounded `cat` degrades this one corner
         # to exactly the behaviour every caller already had before #1103 --
         # not worse, and bounded everywhere `mktemp` still works.
-        _LOCK_PID_READ_RESULT=$(cat "$_file" 2>/dev/null) || true
-        return 0
+        #
+        # #1119: that degraded behaviour must still distinguish a read that
+        # completed (even reading nothing, from a genuinely empty file) from
+        # one that failed outright (EACCES, EIO, ENOENT) -- the exact
+        # distinction the bounded path below exists to make, and the one
+        # this branch's own `|| true` used to erase by forcing `return 0`
+        # unconditionally regardless of `cat`'s own exit status. Losing it
+        # here reopens the identical gap for the one corner where `mktemp`
+        # itself fails: a fast-failing, unreadable pid file would again read
+        # as confirmed-empty and be reclaimable after only
+        # `_LOCK_ADOPT_AFTER` (30s) instead of `_LOCK_MAX_HOLD_SECONDS`
+        # (1800s), from a live holder. `cat` on a genuinely empty, readable
+        # file still exits 0, so this changes nothing for the case this
+        # fallback exists to preserve -- only a `cat` that actually failed
+        # now reports failure, same as the bounded path.
+        if _LOCK_PID_READ_RESULT=$(cat "$_file" 2>/dev/null); then
+            return 0
+        fi
+        _LOCK_PID_READ_RESULT=""
+        return 1
     }
     ( cat "$_file" > "$_tmp" 2>/dev/null ) </dev/null &
     _cat_pid=$!
