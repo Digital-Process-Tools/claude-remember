@@ -1215,7 +1215,7 @@ fi
 # that the holder here still owned the lock throughout -- #1101 added a
 # takeover of a live-but-wedged holder (lib-lock.sh's _LOCK_MAX_HOLD_SECONDS
 # path), so that assumption no longer holds unconditionally; this block does
-# not re-check ownership before writing, a gap raised in the v0.45.1 release
+# not re-check ownership before writing, a gap raised in the v0.45.0 release
 # audit (PR #1118) and left open here -- #1119 only corrects this comment,
 # it does not close the gap.
 append_failed() {
@@ -1602,7 +1602,7 @@ if [ "$RUN_NDC" = true ]; then
                     # genuinely holding it -- it may mean a takeover happened
                     # instead. Neither this acquire nor the commit below
                     # re-validates ownership once acquired -- a gap raised in
-                    # the v0.45.1 release audit (PR #1118) and left open here;
+                    # the v0.45.0 release audit (PR #1118) and left open here;
                     # #1119 only corrects this comment, it does not close the
                     # gap.
                     if [ "$NDC_STAGED" = true ] && lock_acquire "$LOCK_DIR" "$NDC_COMMIT_LOCK_TIMEOUT"; then
