@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.1] - 2026-11-07 — A stuck save lock now recovers safely instead of blocking every future save
+
+### Fixed
+
+- Fixed: a `save.lock` (or `consolidation.lock`/`staging.lock`) holder that is
+  alive but permanently hung -- blocked on I/O, never making progress -- was
+  judged live by `kill -0` forever, so a save could be skipped indefinitely
+  after a single stuck run (#1101). A later acquirer may now take the lock
+  over once it has been held past `REMEMBER_LOCK_MAX_HOLD_SECONDS` (default
+  1800s), measured from the lock directory's own age.
+- Fixed: reading a lock's pid file could block indefinitely on a dataless
+  cloud-sync placeholder (OneDrive, iCloud) whose remote copy had been
+  deleted, consuming a whole hook's own timeout budget and leaving every
+  later save reporting "another save holds the lock, skipping" (#1103). The
+  read is now bounded by `REMEMBER_LOCK_PID_READ_TIMEOUT` (default 2s): a
+  read that does not finish in time is refused on the spot, the same as a
+  lock that is still genuinely held, so a single stuck read costs a couple
+  of seconds instead of blocking for up to a minute. A single timed-out
+  read is never treated as grounds to reclaim the lock -- one timeout
+  cannot tell a permanently stuck placeholder from a live, healthy holder
+  whose pid file merely happened to be slow to read once, and guessing
+  wrong there could let an unrelated process destroy or double-acquire a
+  lock still in normal use. A pid file that NEVER finishes reading (the
+  genuinely stuck case, not a one-off slow read) stops being refused
+  forever once the lock directory is at least as old as
+  `REMEMBER_LOCK_MAX_HOLD_SECONDS`: a later acquirer may then take it over,
+  the same recovery already available for a live-but-wedged holder. A pid
+  file that is confirmed (not merely timed out) empty and old enough is
+  still reclaimed too, exactly as it already was for the
+  no-pid-file-at-all case.
+
+- Fixed: a self-review follow-up to #1101 and #1103's lock-staleness fix
+  closed four further gaps in `lib-lock.sh`. A non-numeric pid file (not
+  merely an empty one) could never be reclaimed, however old, because the
+  reclaim judged it against a value cleared to empty before the
+  comparison that was supposed to use it. A bounded read's reader that
+  ignores `SIGTERM` could still block the whole bound indefinitely; a
+  read that times out now escalates to `SIGKILL`. A reader truly stuck
+  in an uninterruptible kernel read is a separate, narrower case this
+  escalation does not reach -- no signal, including `SIGKILL`, lands on
+  a process until the blocking syscall itself returns -- and is not
+  something a userspace watchdog can force either way. A stale-but-alive
+  holder releasing its own lock could
+  race a concurrent takeover and destroy the new owner's lock instead of
+  its own; release now re-verifies ownership atomically immediately
+  before removing the lock directory -- against a concurrent takeover
+  and, separately, against a concurrent adopter (found in a second
+  self-review pass: an adopter needs a different check, since it
+  creates a brand new pid file rather than racing for the same one) --
+  the same rename-and-recheck technique the takeover path already used.
+  And the bounded pid-file read
+  no longer forks a second `cat` to drain its own scratch file on every
+  release, uncontended or not. A scheduler-measured follow-up found the
+  fork-count fix alone was not enough: an uncontended release still cost
+  ~60-100ms more than before #1101/#1103, because its own timeout loop
+  always paid at least one full poll-sleep interval even when the read
+  finished in microseconds. The timeout is now owned entirely by a
+  background watchdog, so the fast path pays only a single blocking
+  `wait` that returns the instant the read actually finishes.
+
+- Fixed a recurring modal "Windows Script Host access is disabled on this machine" dialog on hosts where WSH is disabled by policy: the detached-save hidden launcher now probes the registry (`HKLM`/`HKCU` `...\Windows Script Host\Settings`) before ever invoking `wscript.exe`, and skips straight to the existing `nohup` fallback instead of risking the dialog (#1104). The probe accepts the `Enabled` value as either `REG_DWORD 0x0` or the `REG_SZ "0"` shape some hardening guides use, and matches the value name case-insensitively, since `reg.exe` itself treats value names as case-insensitive.
+
+- Fixed #1107: the `pytest (ubuntu-latest, 3.9)` CI leg, which `actions/setup-python` cannot run on the `ubuntu-latest` image since it moved to Ubuntu 26.04 (no prebuilt Python 3.9 x64 build). The matrix now routes that one cell onto `ubuntu-24.04`, which still ships 3.9, instead of dropping 3.9 coverage.
+
+- Fixed a mutual-exclusion bug in `scripts/lib-lock.sh`'s file lock on Ubuntu
+  26.04 (#1108). On that image's `ubuntu-latest` GitHub-hosted runner, the
+  lock had lost mutual exclusion entirely: two processes could both believe
+  they held the same lock at once, observed at rates up to 10 of 10 rounds.
+  `lock_acquire` now confirms a `mkdir`-based acquisition with a second,
+  bash-native guard before trusting it, instead of treating `mkdir`'s exit
+  code alone as proof of ownership, so the lock stays correct even if the
+  host's `mkdir` is not exclusive.
+
+- Fixed #1115: the `pytest (macos-latest, 3.12)` CI leg, which needs roughly 28 minutes and was hitting the "Run tests" step's 25-minute `timeout-minutes` cap (and leaving the other macOS legs only ~3 minutes of headroom under it). Raised the step cap to 40 minutes and the job cap to 45 minutes, for both the plain `pytest` job and the `hook-tests-compiled` job that shares the same budget.
+
 ## [0.45.0] - 2026-11-01 — Several windows in one project no longer step on each other's memory
 
 ### Added
@@ -4938,7 +5013,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.45.0...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.45.1...HEAD
+[0.45.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.45.1
 [0.45.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.45.0
 [0.44.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.44.1
 [0.44.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.44.0
