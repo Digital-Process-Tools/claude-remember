@@ -383,8 +383,36 @@ _lock_read_pid_timeout() {
     # A process killed by a signal reports 128+signal from `wait` -- the
     # one portable way to tell "the watchdog had to intervene" from "the
     # reader exited on its own, however it felt about its own exit code"
-    # without any state shared between the two subshells.
-    if [ "$_rc" -ge 128 ]; then
+    # without any state shared between the two subshells. That is the
+    # HUNG case.
+    #
+    # #1119, regression in #1101/#1103: a FAST, ordinary non-hang failure
+    # (EACCES, EIO, a cloud-sync placeholder that errors rather than
+    # hangs) exits below 128 and used to fall straight through to the
+    # success branch below with $_tmp left empty by the failed `cat` --
+    # indistinguishable there from a `cat` that genuinely read an empty
+    # file. `_lock_try_steal` cannot tell "the read completed and the
+    # file truly is empty" from "the read never completed at all" once
+    # they both arrive here looking identical, and treated the fast-fail
+    # case as the confirmed-empty one -- which is gated by
+    # `_LOCK_ADOPT_AFTER` (30s) rather than `_LOCK_MAX_HOLD_SECONDS`
+    # (1800s), so a live holder's lock could be stolen out from under it
+    # 60x sooner than any other takeover path allows, from a failure mode
+    # that has nothing to do with how long the lock has been held.
+    #
+    # Any non-zero exit, not only >=128, is therefore treated as "the
+    # read did not complete" -- a single, deliberate rule: this function
+    # tells callers whether a read FINISHED (0) or not (1), and reserves
+    # the content it finished with for a true success. The fast-fail case
+    # then flows through the exact same code path the HUNG case already
+    # has at every caller: refuse the empty-pid steal, but remain
+    # recoverable through the existing age-gated takeover of a live-or-
+    # unreadable holder once the lock directory itself is older than
+    # `_LOCK_MAX_HOLD_SECONDS` -- the same bound a holder that is merely
+    # alive-but-wedged is already held to, deliberately, since a pid file
+    # that fails fast every time is exactly as uninformative about
+    # whether its holder is alive as one that times out every time.
+    if [ "$_rc" -ne 0 ]; then
         rm -f "$_tmp" 2>/dev/null || true
         return 1
     fi

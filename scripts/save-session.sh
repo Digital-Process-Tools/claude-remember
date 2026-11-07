@@ -1211,7 +1211,12 @@ fi
 # does not end in .md so neither today-*.md nor session-start injection can see
 # it — but it would accumulate forever, so sweep first. Safe: this block is the
 # only thing that creates these, it runs under save.lock, and NDC's sweep uses a
-# different glob (now.md.ndc-*).
+# different glob (now.md.ndc-*). "Runs under save.lock" assumed, until #1101,
+# that the holder here still owned the lock throughout -- #1101 added a
+# takeover of a live-but-wedged holder (lib-lock.sh's _LOCK_MAX_HOLD_SECONDS
+# path), so that assumption no longer holds unconditionally; this block does
+# not re-check ownership before writing, a gap tracked rather than closed here
+# (trap.d/1101.save-lock-takeover-breaks-ownership-assumption.md, #1119).
 append_failed() {
     rm -f "$APPEND_TMP" 2>/dev/null
     log "write" "ERROR: cannot write now.md -- $1"
@@ -1587,9 +1592,18 @@ if [ "$RUN_NDC" = true ]; then
                     # deadlock (lock_acquire spins to a deadline and returns 1)
                     # and costs nothing: nothing waits on this subshell.
                     #
-                    # It cannot steal the lock from a live save either — steal
-                    # needs a dead pid, adoption needs no pid at all — so losing
-                    # the wait means someone is genuinely holding it.
+                    # #1101 added exactly the takeover this comment used to
+                    # say could not happen: a live-but-wedged holder is reclaimed
+                    # once the lock directory is older than
+                    # _LOCK_MAX_HOLD_SECONDS (lib-lock.sh), independent of
+                    # whether the original holder is still making progress.
+                    # Losing the wait therefore no longer proves someone is
+                    # genuinely holding it -- it may mean a takeover happened
+                    # instead. Neither this acquire nor the commit below
+                    # re-validates ownership once acquired; see
+                    # trap.d/1101.save-lock-takeover-breaks-ownership-assumption.md
+                    # (#1119) for the gap this leaves (tracked, not closed
+                    # here).
                     if [ "$NDC_STAGED" = true ] && lock_acquire "$LOCK_DIR" "$NDC_COMMIT_LOCK_TIMEOUT"; then
                         # Re-read the size under the lock. The offset stays valid as
                         # the START of the kept range no matter what happened during
