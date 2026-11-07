@@ -462,7 +462,16 @@ _lock_read_pid_timeout() {
 # converge on the SAME guarded restore path below.
 _lock_handback() {
     local _claim="$1" _dir="$2" _content="${3:-}" _write_ok=1
-    if [ -z "$_content" ]; then
+    # $# (second-pass self-review, #1124), not "[ -z "$_content" ]": a pid
+    # file this function's caller legitimately read AS EMPTY (a holder
+    # mid-acquisition, or one that died before writing its pid -- both
+    # documented a few lines below) is content just as real as any other,
+    # and "${3:-}" collapsed that case into the SAME "unknown" bucket as
+    # "the caller never attempted a read at all", routing a real, known
+    # empty value into the weaker fallback below instead of the atomic
+    # noclobber write. "$#" answers "was a 3rd argument given AT ALL",
+    # regardless of its value, which is the distinction this needs.
+    if [ "$#" -lt 3 ]; then
         _write_ok=0
     elif ! ( set -o noclobber; echo "$_content" > "${_dir}/pid" ) 2>/dev/null; then
         _write_ok=0
@@ -471,6 +480,17 @@ _lock_handback() {
         rm -f "$_claim" 2>/dev/null || true
         return 0
     fi
+    # Narrower than the bare `mv` this replaces, not zero (second-pass
+    # self-review, #1124): there is no content here to restore via the
+    # atomic noclobber write above (content was never known, or was known
+    # and the write above already found something there), so the best
+    # available guard is check-then-act -- a legitimate writer landing in
+    # the few-instruction gap between this `-e` test and the `mv` below
+    # would still get clobbered. Accepted rather than closed: closing it
+    # would need an atomic "create only if absent, with THIS content"
+    # primitive for content this function does not have, the same
+    # tradeoff documented for the pid-recycling and inode-portability
+    # limitations elsewhere in this file.
     if [ -e "${_dir}/pid" ]; then
         rm -f "$_claim" 2>/dev/null || true
         return 1
@@ -525,6 +545,21 @@ _lock_handback() {
 # documented near the top of this file: logged rather than solved here.
 _lock_rename_preserves_identity() {
     local _dir="$1" _parent _probe _moved _i1 _i2
+    # Trailing slash(es) stripped first (second-pass self-review, #1124):
+    # "${_dir%/*}" on a path that already ends in "/" strips only that
+    # slash, landing back on the SAME directory rather than its parent --
+    # silently undoing the whole point of this relocation for any caller
+    # that happens to pass a trailing slash, reopening the staleness-clock
+    # bug the relocation exists to close. A `case`/glob loop, not bash's
+    # `${var: -N}` substring form: negative offsets there need bash >= 4.2,
+    # and this file is sourced under bash 3.2 (macOS's shipped /bin/bash).
+    while :; do
+        case "$_dir" in
+            */) _dir="${_dir%/}" ;;
+            *) break ;;
+        esac
+    done
+    [ -n "$_dir" ] || _dir="/"
     _parent="${_dir%/*}"
     [ "$_parent" = "$_dir" ] && _parent="."
     _probe="${_parent}/.steal-probe.${_LOCK_SELF}"

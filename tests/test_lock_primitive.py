@@ -2314,6 +2314,82 @@ def test_identity_probe_does_not_reset_the_lock_directory_staleness_clock_1124(
     )
 
 
+def test_identity_probe_still_avoids_the_lock_directory_with_a_trailing_slash(
+    tmp_path,
+):
+    """Second-pass self-review of #1124 (oss:auditor finding): the parent
+    derivation "${_dir%/*}" strips only ONE trailing slash from a path
+    that already ends in "/", landing back on the SAME directory rather
+    than its parent -- silently reopening the staleness-clock bug this
+    relocation exists to close, for any caller that happens to pass a
+    trailing slash. Same probe as
+    test_identity_probe_does_not_reset_the_lock_directory_staleness_clock_1124,
+    with a trailing slash appended to the path handed to the function
+    under test.
+    """
+    lock_dir = tmp_path / "probe-mtime-trailing-slash.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("888888", encoding="utf-8")
+    old_time = time.time() - 120
+    os.utime(lock_dir, (old_time, old_time))
+    dir_arg = str(lock_dir) + "/"
+    result = _run(
+        f"""
+        source {LIB_LOCK_SH}
+        _lock_self_set
+        echo "before=$(_lock_dir_age "{lock_dir}")"
+        _lock_rename_preserves_identity "{dir_arg}" >/dev/null 2>&1
+        echo "after=$(_lock_dir_age "{lock_dir}")"
+        """,
+        timeout=15,
+    )
+    stdout = result.stdout
+    before = int(stdout.split("before=")[1].split()[0])
+    after = int(stdout.split("after=")[1].split()[0])
+    assert after >= 100, (
+        f"a trailing slash on the directory argument must not defeat the "
+        f"parent-directory relocation: before={before} after={after} "
+        f"{stdout!r} {result.stderr!r}"
+    )
+
+
+def test_handback_treats_a_legitimately_empty_read_as_known_content(
+    tmp_path,
+):
+    """Second-pass self-review of #1124 (both reviewers independently):
+    "${3:-}" collapses "the caller never attempted a read" and "the
+    caller read successfully and the pid file is legitimately empty" (a
+    holder mid-acquisition, or one that died before writing its pid --
+    both real cases documented elsewhere in this file) into the SAME
+    "unknown content" bucket, routing a known-empty value into the
+    weaker fallback instead of the atomic noclobber write. The claim's
+    own on-disk content is deliberately set to something ELSE, so the
+    two branches are distinguishable: the fallback would restore the
+    claim's unrelated real bytes; the noclobber write restores the
+    EMPTY content that was actually passed.
+    """
+    lock_dir = tmp_path / "handback-empty-content.lock"
+    lock_dir.mkdir()
+    claim = lock_dir / "pid.stealing.888888"
+    claim.write_text("999999", encoding="utf-8")
+    _run(
+        f"""
+        source {LIB_LOCK_SH}
+        _lock_handback "{claim}" "{lock_dir}" ""
+        """,
+        timeout=15,
+    )
+    pid_file = lock_dir / "pid"
+    assert pid_file.exists(), "a known-content hand-back must still restore"
+    content = pid_file.read_text(encoding="utf-8")
+    assert content.strip() == "", (
+        f"a legitimately empty read must be restored as empty via the "
+        f"noclobber write, not via the unknown-content fallback, which "
+        f"would restore the claim's own unrelated on-disk bytes instead: "
+        f"{content!r}"
+    )
+
+
 def test_handback_never_clobbers_a_pid_another_process_legitimately_wrote(
     tmp_path,
 ):
