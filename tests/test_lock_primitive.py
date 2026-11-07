@@ -2198,6 +2198,73 @@ def test_a_fast_failing_claim_reread_does_not_steal_a_racing_winners_pid_1122(
     )
 
 
+def test_a_persistently_unreadable_pid_still_steals_when_rename_does_not_preserve_identity_1124(
+    tmp_path,
+):
+    """#1124: `_lock_file_inode` assumes rename preserves a file's identity.
+    Not true everywhere -- FAT/exFAT under Cygwin/MSYS, SMB with
+    noserverino, FUSE without use_ino (#1103's own setup). There the #1122
+    identity comparison can never match for the SAME file, so a
+    persistently-unreadable but genuinely stuck pid file would hand back
+    on every steal attempt forever -- #1103's outage, reopened by the
+    check meant to prevent a different one.
+
+    Simulated by replacing `_lock_file_inode` with a function returning a
+    fresh, never-repeating value on every call, regardless of its
+    argument -- a stand-in for a filesystem whose rename never preserves
+    identity. `_lock_rename_preserves_identity`'s own self-test uses the
+    same function and must see the same unreliability and answer false,
+    so `_lock_try_steal` must skip the comparison rather than trust it,
+    and still steal.
+    """
+    reason = _chmod_unreadable_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    lock_dir = tmp_path / "steal-no-identity.lock"
+    lock_dir.mkdir()
+    pid_file = lock_dir / "pid"
+    pid_file.write_text("555555", encoding="utf-8")
+    pid_file.chmod(0o000)
+    try:
+        result = _run(
+            f"""
+            export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
+            export REMEMBER_LOCK_PID_READ_TIMEOUT=1
+            source {LIB_LOCK_SH}
+            _counter_file="{lock_dir}/.inode-counter"
+            echo 0 > "$_counter_file"
+            _lock_file_inode() {{
+                local _n
+                _n=$(cat "$_counter_file")
+                _n=$((_n + 1))
+                echo "$_n" > "$_counter_file"
+                echo "$_n"
+            }}
+            if _lock_try_steal "{lock_dir}"; then
+                echo STOLE
+            else
+                echo REFUSED
+            fi
+            """,
+            timeout=15,
+        )
+        assert "STOLE" in result.stdout, (
+            f"a persistently unreadable, old-enough pid file must still "
+            f"be stealable even when this filesystem's identity check "
+            f"can never report a match for the same file -- refusing "
+            f"forever here reproduces #1103's outage: "
+            f"{result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        if pid_file.exists():
+            pid_file.chmod(0o644)
+    new_pid = pid_file.read_text(encoding="utf-8").strip()
+    assert new_pid.isdigit(), (
+        f"after a real steal, the pid file must hold this contender's "
+        f"own numeric pid: {new_pid!r}"
+    )
+
+
 def test_a_persistently_unreadable_claim_with_no_race_still_steals_1122(
     tmp_path,
 ):
@@ -2246,4 +2313,99 @@ def test_a_persistently_unreadable_claim_with_no_race_still_steals_1122(
     assert new_pid.isdigit(), (
         f"after a real steal, the pid file must hold this contender's own "
         f"numeric pid, not be left empty or non-numeric: {new_pid!r}"
+    )
+
+
+def test_a_winner_completing_during_the_first_read_is_not_mistaken_for_the_placeholder_1124(
+    tmp_path,
+):
+    """#1124, follow-on finding against #1123/#1122: the #1122 "before"
+    inode snapshot was taken AFTER both the first pid read (line ~484 in
+    the pre-#1124 source) had already timed out AND the age check further
+    down had also already run -- a window wide enough, since the read's
+    own timeout is whole seconds and a rename-plus-rewrite elsewhere is
+    microseconds, for another contender to complete an entire steal cycle
+    inside it. If that happens, the "before" snapshot is already of the
+    winner's own brand-new pid file, not of the stuck placeholder the read
+    judged -- and the later #1122 comparison then sees "unchanged" for a
+    file that was, in fact, swapped out from under this contender.
+
+    This reproduces the mechanism by wrapping `_lock_read_pid_timeout`,
+    the function whose first call IS the read being judged: the wrapper
+    runs the real read against the real (stuck, chmod 000) placeholder
+    first, getting the correct failure, then -- as a side effect timed to
+    land exactly when that read returns, before anything else in
+    `_lock_try_steal` runs -- swaps in a winner's own fresh pid file,
+    ALSO chmod 000 so the subsequent content re-read of the claim fails
+    fast too (landing on #1122's own shape, not #1119's hang shape), and
+    forcing the decision down to the inode comparison. Built via mktemp +
+    mv, never rm-then-create in place, for the same bitmap-allocator
+    reason #1122's own test documents: a distinct temp file guarantees a
+    distinct inode before the swap, so the swap is observably different by
+    construction, not by allocator luck.
+
+    Pre-#1124, the "before" snapshot captured at this point is already of
+    the swapped-in winner's file, so the comparison sees a match and
+    steals the winner's live lock -- two holders. Fixed by moving the
+    snapshot to the top of `_lock_try_steal`, before the first read is
+    even attempted, so it answers for the placeholder the read is about
+    to judge, not for whatever happens to be at the path afterward.
+    """
+    reason = _chmod_unreadable_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    lock_dir = tmp_path / "steal-read-race.lock"
+    lock_dir.mkdir()
+    pid_file = lock_dir / "pid"
+    pid_file.write_text("111111", encoding="utf-8")
+    pid_file.chmod(0o000)
+    winner_pid_text = "333333"
+    try:
+        result = _run(
+            f"""
+            export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
+            export REMEMBER_LOCK_PID_READ_TIMEOUT=1
+            source {LIB_LOCK_SH}
+            eval "$(declare -f _lock_read_pid_timeout | sed '1s/^_lock_read_pid_timeout ()/_orig_lock_read_pid_timeout ()/')"
+            _swap_marker="{lock_dir}/.swap-done"
+            rm -f "$_swap_marker"
+            _lock_read_pid_timeout() {{
+                _orig_lock_read_pid_timeout "$@"
+                _rc=$?
+                if [ ! -e "$_swap_marker" ]; then
+                    touch "$_swap_marker"
+                    _winner_tmp=$(mktemp "{lock_dir}/.winner-pid.XXXXXX")
+                    printf '%s' "{winner_pid_text}" > "$_winner_tmp"
+                    chmod 000 "$_winner_tmp"
+                    mv -f "$_winner_tmp" "{lock_dir}/pid"
+                fi
+                return $_rc
+            }}
+            if _lock_try_steal "{lock_dir}"; then
+                echo STOLE
+            else
+                echo REFUSED
+            fi
+            """,
+            timeout=15,
+        )
+        assert "REFUSED" in result.stdout, (
+            f"a winner that completes its own steal-and-rewrite cycle "
+            f"while this contender's FIRST read is still in flight must "
+            f"not be clobbered just because the 'before' identity snapshot "
+            f"was taken late enough to already see the winner's file -- "
+            f"that produces two simultaneous holders: "
+            f"{result.stdout!r} {result.stderr!r}"
+        )
+        assert pid_file.exists(), (
+            f"the hand-back must restore A pid file, not leave the lock "
+            f"pid-less: {result.stdout!r} {result.stderr!r}"
+        )
+    finally:
+        if pid_file.exists():
+            pid_file.chmod(0o644)
+    assert pid_file.read_text(encoding="utf-8") == winner_pid_text, (
+        f"the winner's own pid must survive untouched: got "
+        f"{pid_file.read_text(encoding='utf-8')!r}, expected "
+        f"{winner_pid_text!r}: {result.stdout!r} {result.stderr!r}"
     )

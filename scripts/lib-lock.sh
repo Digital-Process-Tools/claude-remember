@@ -446,6 +446,63 @@ _lock_read_pid_timeout() {
     return 0
 }
 
+# Hand a claim file back to the lock's pid path without clobbering a pid
+# some OTHER process already wrote there in the meantime (#1124). Reads
+# the claim's own content back and writes it with `noclobber`, giving the
+# restore the same atomicity the real steal writes already have below.
+# Falls back to a plain `mv` only if the claim's content cannot even be
+# read back.
+_lock_handback() {
+    local _claim="$1" _dir="$2" _content
+    if _lock_read_pid_timeout "$_claim"; then
+        _content="$_LOCK_PID_READ_RESULT"
+        if ( set -o noclobber; echo "$_content" > "${_dir}/pid" ) 2>/dev/null; then
+            rm -f "$_claim" 2>/dev/null || true
+            return 0
+        fi
+        rm -f "$_claim" 2>/dev/null || true
+        return 1
+    fi
+    mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+    return 1
+}
+
+# Whether renaming a file within <dir> preserves its identity (the value
+# `_lock_file_inode` reports) across the move. True on every POSIX
+# filesystem this file otherwise assumes; false on FAT/exFAT under
+# Cygwin/MSYS (the "inode" there is a hash of the path, which rename
+# changes by definition), SMB mounted with noserverino, and FUSE mounts
+# without use_ino -- #1103's own dataless-placeholder setup is exactly
+# this class (#1124). On any of those the #1122 identity check below would
+# compare two values that can never match for the SAME file, and hand
+# back on every steal attempt forever -- reopening #1103's own outage
+# with the very check meant to prevent a different bug.
+#
+# Probed with a throwaway file IN <dir> itself so the answer is for the
+# exact filesystem the steal is about to run on. Only reached from inside
+# a steal attempt, already paying for a multi-second read timeout above
+# it, and never on the uncontended acquire path, which never calls
+# _lock_try_steal at all.
+#
+# A probe that itself fails to create or rename answers false -- the safe
+# default: it disables a check this contender cannot even confirm works,
+# rather than trusting metadata that was never verified meaningful here.
+_lock_rename_preserves_identity() {
+    local _dir="$1" _probe _moved _i1 _i2
+    _probe="${_dir}/.steal-probe.${_LOCK_SELF}"
+    _moved="${_probe}.moved"
+    rm -f "$_probe" "$_moved" 2>/dev/null || true
+    ( umask 077; : > "$_probe" ) 2>/dev/null || return 1
+    _i1=$(_lock_file_inode "$_probe")
+    if ! mv "$_probe" "$_moved" 2>/dev/null; then
+        rm -f "$_probe" 2>/dev/null || true
+        return 1
+    fi
+    _i2=$(_lock_file_inode "$_moved")
+    rm -f "$_moved" 2>/dev/null || true
+    [ -n "$_i1" ] && [ -n "$_i2" ] && [ "$_i1" = "$_i2" ]
+}
+
 # Take a stale lock away from a dead holder. Returns 0 only for the single
 # process that won the rename — everyone else gets 1 and keeps waiting.
 _lock_try_steal() {
@@ -480,6 +537,23 @@ _lock_try_steal() {
             fi
         done
     fi
+
+    # Captured BEFORE the read below, not after it as an earlier version of
+    # this fix did -- #1124, a follow-on finding against #1122. The
+    # previous "before" snapshot ran only after the read below had ALREADY
+    # timed out and the age check further down had ALSO already run, which
+    # is a window wide enough (the read's own timeout is whole seconds; a
+    # rename-plus-rewrite elsewhere is microseconds) for some other
+    # contender to complete an entire steal-and-rewrite cycle inside it --
+    # so the old snapshot could already be of THAT contender's brand-new
+    # pid file, not of the stuck placeholder the read below is about to
+    # judge. The #1122 comparison later on would then see "unchanged" for
+    # a file that was, in fact, swapped out from under this contender
+    # mid-function. `stat` is metadata-only and answers unconditionally,
+    # dataless placeholder or not, so capturing it this early costs
+    # nothing extra -- including on the fast, non-stealing path below,
+    # which simply never uses the value.
+    _pre_steal_inode=$(_lock_file_inode "${_dir}/pid")
 
     if _lock_read_pid_timeout "${_dir}/pid"; then
         _pid="$_LOCK_PID_READ_RESULT"
@@ -530,12 +604,10 @@ _lock_try_steal() {
         # path again -- is what actually closes that gap: see the
         # comment right after the `mv`. Removing it reopens the race.
         [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_MAX_HOLD_SECONDS" ] || return 1
-        # Captured BEFORE the rename, not derived from it: `stat` reads
-        # metadata only, so this still answers even though the content read
-        # above just failed. This is the "before" half of the #1122 check
-        # below -- what we are ABOUT to grab, independent of whether we can
-        # read what is inside it.
-        _pre_steal_inode=$(_lock_file_inode "${_dir}/pid")
+        # _pre_steal_inode was already captured above, before the read at
+        # the top of this function even started -- see the comment there
+        # for why (#1124). Re-deriving it here, after the age check, is
+        # exactly the bug that comment describes.
         mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
         # Confirmed by direct repro (N=8 concurrent contenders) that
         # skipping this check lets 7 of 8 believe they won: this winner's
@@ -552,7 +624,7 @@ _lock_try_steal() {
         # contender's signal that it grabbed someone else's win by
         # mistake and must hand it back rather than overwrite it.
         if _lock_read_pid_timeout "$_claim"; then
-            mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+            _lock_handback "$_claim" "$_dir"
             return 1
         fi
         # #1122: the re-read above failing is NOT by itself proof that
@@ -580,10 +652,22 @@ _lock_try_steal() {
         # or either inode lookup itself coming back empty, is exactly the
         # ambiguity #1119/#1120 already decided must refuse rather than
         # guess: hand back.
-        _claim_inode=$(_lock_file_inode "$_claim")
-        if [ -z "$_pre_steal_inode" ] || [ -z "$_claim_inode" ] || [ "$_pre_steal_inode" != "$_claim_inode" ]; then
-            mv "$_claim" "${_dir}/pid" 2>/dev/null || true
-            return 1
+        # On a filesystem where rename does not preserve identity (#1124:
+        # FAT/exFAT under Cygwin/MSYS, SMB with noserverino, FUSE without
+        # use_ino), $_pre_steal_inode and $_claim_inode could never match
+        # even for the exact same file -- comparing them anyway would hand
+        # back on every single steal attempt here, forever, reopening
+        # #1103's own permanent outage via the very check meant to prevent
+        # a different one. Skipped there rather than guessed at; the
+        # content re-read just above is the only guard left on such a
+        # filesystem, the same accepted-and-documented tradeoff as the
+        # pid-recycling limitation noted near the top of this file.
+        if _lock_rename_preserves_identity "$_dir"; then
+            _claim_inode=$(_lock_file_inode "$_claim")
+            if [ -z "$_pre_steal_inode" ] || [ -z "$_claim_inode" ] || [ "$_pre_steal_inode" != "$_claim_inode" ]; then
+                _lock_handback "$_claim" "$_dir"
+                return 1
+            fi
         fi
         if ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null; then
             rm -f "$_claim" 2>/dev/null || true
@@ -646,12 +730,12 @@ _lock_try_steal() {
     # "could not confirm" and "confirmed identical" collapse into the same
     # branch is precisely the self-review finding above, one line later.
     if ! _lock_read_pid_timeout "$_claim"; then
-        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        _lock_handback "$_claim" "$_dir"
         return 1
     fi
     _seen="$_LOCK_PID_READ_RESULT"
     if [ "$_seen" != "$_pid" ]; then
-        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        _lock_handback "$_claim" "$_dir"
         return 1
     fi
 
@@ -708,10 +792,12 @@ _lock_dir_age() {
 #
 # Same BSD-vs-GNU `stat` split as _lock_dir_age above, and the exact same
 # #198 gotcha applies to `%i`: GNU's `-f` means FILESYSTEM status, not file
-# status, and its own `%i` under that mode is "free inodes on the
-# filesystem" -- a large, plausible-looking, completely unrelated digit
-# string that the naive digits-only guard would otherwise accept as a real
-# inode number. Captured separately, exactly like the mtime case, so `-f`
+# status, and its own `%i` under that mode is the filesystem's own ID,
+# printed in hex -- not the count of free inodes (that is `%d`), as an
+# earlier version of this comment wrongly claimed (#1124). Still a
+# plausible-looking, completely unrelated string the naive digits-only
+# guard would otherwise accept whenever that hex ID happens to come out
+# all-digits. Captured separately, exactly like the mtime case, so `-f`
 # is only ever tried once `-c` has already failed outright (true on BSD,
 # where `-c` is not a valid flag at all) rather than once `-c` has produced
 # a wrong-but-numeric answer.
