@@ -92,19 +92,19 @@
 #     was deleted after the placeholder synced) blocks a plain `cat` on the
 #     read syscall rather than returning content or an error.
 #     `_lock_read_pid_timeout` bounds that read so it cannot consume a
-#     whole hook's own timeout budget. A read that does not complete in time
-#     is treated as "still held, try again later" -- a SINGLE timeout is
-#     never grounds to reclaim: it cannot tell a permanently stuck
-#     placeholder from a live holder's pid file that is merely slow to
-#     read once, and guessing wrong there would let an unrelated process
-#     steal or delete a lock a healthy holder still owns (#1103, found in
-#     this fix's own self-review). The fast timeout alone is still
-#     strictly better than the unbounded `cat` it replaces. A pid file
-#     that NEVER finishes reading is a different case, handled the same
-#     way a live-but-wedged holder already is: once the lock directory
-#     has sat untouched past `_LOCK_MAX_HOLD_SECONDS`, a later acquirer
-#     may take it over (`_lock_try_steal`'s own timed-out-read branch),
-#     a scheduler-measured follow-up to the original #1103 fix.
+#     whole hook's own timeout budget, but a read that does not complete
+#     in time is NEVER grounds to reclaim, at any age (#1127): v0.45.1
+#     (#1101/#1103) once let a later acquirer take such a lock over once
+#     the directory itself sat past `_LOCK_MAX_HOLD_SECONDS`, and five
+#     review rounds in a row (#1119, #1122, #1124/#1125, the reviews on
+#     the still-unmerged PR #1126) each found a new two-simultaneous-
+#     holders interleaving in that takeover, however it was tightened.
+#     Refusing unconditionally trades that outage for a lock that has to
+#     be cleared by hand once its pid file genuinely cannot be read --
+#     the same thing v0.45.0 already did here, before #1101/#1103 ever
+#     touched this branch. The bound on the read itself is kept
+#     regardless: it still stops one stuck read from consuming a whole
+#     hook's own timeout budget, it just no longer licenses a takeover.
 
 [ -n "${_REMEMBER_LIB_LOCK_SOURCED:-}" ] && return 0
 _REMEMBER_LIB_LOCK_SOURCED=1
@@ -449,7 +449,7 @@ _lock_read_pid_timeout() {
 # Take a stale lock away from a dead holder. Returns 0 only for the single
 # process that won the rename — everyone else gets 1 and keeps waiting.
 _lock_try_steal() {
-    local _dir="$1" _pid _seen _abandoned _owner _claim _pre_steal_inode _claim_inode
+    local _dir="$1" _pid _seen _abandoned _owner _claim
     # Per-process, NOT a shared name: with one `pid.stealing` for everyone, a
     # second process could "restore" a claim that was still in flight and then
     # claim it itself, and both would proceed. Two winners at N=8, reproducibly.
@@ -484,112 +484,29 @@ _lock_try_steal() {
     if _lock_read_pid_timeout "${_dir}/pid"; then
         _pid="$_LOCK_PID_READ_RESULT"
     else
-        # Did not complete within _LOCK_PID_READ_TIMEOUT -- a dataless
-        # cloud-sync placeholder blocks the read rather than returning
-        # content (#1103), but a read that is merely slow ONCE looks
-        # identical from here, and a live, healthy holder's pid file can be
-        # slow to read for reasons that have nothing to do with how long the
-        # lock itself has been held. Guessing "debris" from a single timeout
-        # risks stealing a lock out from under a holder that is making
-        # normal progress -- found in self-review (#1101/#1103): treating
-        # this the same as a genuinely-empty-and-old pid let two processes
-        # both believe they held the same lock whenever BOTH this read and
-        # the post-rename re-check below happened to time out the same way.
-        # Refuse and let the caller retry rather than steal on a guess; the
-        # fast timeout alone is still strictly better than the unbounded
-        # `cat` this replaces, which could block an entire hook's budget.
+        # #1127: a pid file whose read fails or times out is NEVER grounds
+        # to steal, at any age -- v0.45.0's own behaviour, restored. v0.45.1
+        # (#1101/#1103) added an age-gated takeover for exactly this case,
+        # and five review rounds (#1119, #1122, #1124/#1125, plus the
+        # reviews on the still-unmerged PR #1126) each found a NEW two-
+        # simultaneous-holders interleaving in the tightened version that
+        # followed the previous fix -- the pattern never converged, it only
+        # ever moved. A single timeout or fast read failure cannot tell a
+        # permanently stuck placeholder (a dataless OneDrive/iCloud file
+        # whose remote copy is gone for good) from a live holder's pid file
+        # that is merely slow, or transiently unreadable, for reasons that
+        # have nothing to do with how long the lock has been held --
+        # guessing wrong there is exactly what let a second process believe
+        # it held a lock a healthy holder still owned.
         #
-        # Refusing FOREVER, however, is its own outage: a pid file that
-        # NEVER finishes reading (the actual #1103 shape -- a dataless
-        # placeholder whose remote copy is gone for good, not merely a
-        # holder that was slow once) would make every later acquirer time
-        # out at this exact point, forever, with "another save holds the
-        # lock, skipping" logged after 2s instead of ~60s but just as
-        # permanently (scheduler-measured follow-up: #1103 was faster,
-        # not fixed). The SAME age bound that already lets a later
-        # acquirer take over a live-but-wedged holder (`kill -0` succeeds
-        # forever, below) applies here too: once the lock directory
-        # itself has sat untouched for at least _LOCK_MAX_HOLD_SECONDS
-        # AND the pid file still refuses to finish reading, treat it the
-        # same as a wedged live holder and take it over.
-        #
-        # Deliberately NEVER re-reads the ORIGINAL "${_dir}/pid" to get
-        # here -- it already timed out once above and would time out
-        # again, paying the same bound for nothing. The atomic `mv`
-        # ALONE is not the whole single-winner guarantee here, though:
-        # unlike the two branches below (which read real content and
-        # re-check THAT survived the rename), this branch has no content
-        # to compare against, and self-review on this exact fix found a
-        # real race from skipping the check anyway -- a winner's own
-        # write recreates "${_dir}/pid" an instant after the rename, and
-        # a slower contender's `mv` can then grab that brand-new, healthy
-        # pid file with nothing yet telling it apart from the stuck
-        # placeholder it meant to steal (reproduced directly: 7 of 8
-        # concurrent contenders believed they won). The re-read below,
-        # of the CLAIM this rename just produced -- never the original
-        # path again -- is what actually closes that gap: see the
-        # comment right after the `mv`. Removing it reopens the race.
-        [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_MAX_HOLD_SECONDS" ] || return 1
-        # Captured BEFORE the rename, not derived from it: `stat` reads
-        # metadata only, so this still answers even though the content read
-        # above just failed. This is the "before" half of the #1122 check
-        # below -- what we are ABOUT to grab, independent of whether we can
-        # read what is inside it.
-        _pre_steal_inode=$(_lock_file_inode "${_dir}/pid")
-        mv "${_dir}/pid" "$_claim" 2>/dev/null || return 1
-        # Confirmed by direct repro (N=8 concurrent contenders) that
-        # skipping this check lets 7 of 8 believe they won: this winner's
-        # own noclobber write below RECREATES "${_dir}/pid", and a slower
-        # contender's `mv` (racing on the SAME path, not the content) can
-        # then grab that brand-new, perfectly healthy pid file an instant
-        # after it was written, with nothing yet telling it apart from
-        # the stuck placeholder it meant to grab. Re-reading from the
-        # CLAIM this rename just produced -- never the original path
-        # again -- tells the two apart cheaply: a genuine stuck FIFO
-        # (rename preserves the underlying special file, not the
-        # content) still times out identically; a fresh pid some faster
-        # winner already wrote resolves immediately, which is this
-        # contender's signal that it grabbed someone else's win by
-        # mistake and must hand it back rather than overwrite it.
-        if _lock_read_pid_timeout "$_claim"; then
-            mv "$_claim" "${_dir}/pid" 2>/dev/null || true
-            return 1
-        fi
-        # #1122: the re-read above failing is NOT by itself proof that
-        # $_claim is still the genuinely stuck placeholder it looked like
-        # before the rename -- #1119/#1120 made EVERY read failure here
-        # (a real timeout, or a fast EACCES/EIO/cloud-sync refusal) report
-        # identically as "1", so a fast-failing re-read of a faster
-        # winner's brand-new pid -- grabbed by exactly the same-path race
-        # the comment above describes, just landing on content this
-        # contender cannot read for an unrelated, transient reason -- is
-        # read exactly like a confirmed-still-stuck placeholder and falls
-        # through to steal below. That reopens the identical "confirmed
-        # empty" mistake #1119 already closed at the FIRST read, one call
-        # site over, and lets this contender clobber a winner's lock,
-        # producing two simultaneous holders.
-        #
-        # Compare inode, not content: rename preserves the underlying
-        # inode, so $_claim's inode equals whatever this contender is
-        # ACTUALLY holding right now, and `_lock_file_inode` needs no read
-        # permission on that file's content to answer, unlike
-        # `_lock_read_pid_timeout`. A match means nothing was swapped in
-        # between the capture above and this rename -- genuinely the same
-        # file whose first read already failed too, consistent with a
-        # placeholder that is still stuck, and safe to steal. A mismatch,
-        # or either inode lookup itself coming back empty, is exactly the
-        # ambiguity #1119/#1120 already decided must refuse rather than
-        # guess: hand back.
-        _claim_inode=$(_lock_file_inode "$_claim")
-        if [ -z "$_pre_steal_inode" ] || [ -z "$_claim_inode" ] || [ "$_pre_steal_inode" != "$_claim_inode" ]; then
-            mv "$_claim" "${_dir}/pid" 2>/dev/null || true
-            return 1
-        fi
-        if ( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" ) 2>/dev/null; then
-            rm -f "$_claim" 2>/dev/null || true
-            return 0
-        fi
-        rm -f "$_claim" 2>/dev/null || true
+        # Refusing here is a liveness cost, not a safety one, and it is
+        # accepted deliberately: a lock left behind by a holder whose pid
+        # file can no longer be read must now be cleared by hand (delete
+        # the lock directory) rather than being taken over automatically.
+        # The bounded read above is kept on its own merits regardless --
+        # it still stops a single stuck read from consuming a whole hook's
+        # own timeout budget (#1103) -- it simply no longer licenses a
+        # takeover once it fails.
         return 1
     fi
 
@@ -697,36 +614,6 @@ _lock_dir_age() {
     _now=$(date +%s)
     # 10# after the case, never instead of it (#332).
     echo $(( _now - 10#$_mtime ))
-}
-
-# Inode of <path>, or empty if it cannot be determined. `stat` needs no
-# permission on the file's own CONTENT -- only search permission on its
-# containing directory -- so this still answers for a file this process
-# cannot `cat` (#1122): the whole point of using it in _lock_try_steal to
-# tell "still the same file" from "silently swapped for a different one"
-# without caring whether either is readable.
-#
-# Same BSD-vs-GNU `stat` split as _lock_dir_age above, and the exact same
-# #198 gotcha applies to `%i`: GNU's `-f` means FILESYSTEM status, not file
-# status, and its own `%i` under that mode is "free inodes on the
-# filesystem" -- a large, plausible-looking, completely unrelated digit
-# string that the naive digits-only guard would otherwise accept as a real
-# inode number. Captured separately, exactly like the mtime case, so `-f`
-# is only ever tried once `-c` has already failed outright (true on BSD,
-# where `-c` is not a valid flag at all) rather than once `-c` has produced
-# a wrong-but-numeric answer.
-#
-# No timeout wrapper around this `stat`, unlike `_lock_read_pid_timeout`:
-# reasoned, not reproduced -- a metadata-only syscall does not block on the
-# same "data never arrives" shape an actual read of a FIFO or a dataless
-# placeholder can (#1101/#1103), so this file does not pay for a bound it
-# has no observed need for.
-_lock_file_inode() {
-    local _inode
-    _inode=$(stat -c %i "$1" 2>/dev/null) || _inode=""
-    [ -n "$_inode" ] && [[ "$_inode" != *[!0-9]* ]] || _inode=$(stat -f %i "$1" 2>/dev/null) || _inode=""
-    [ -n "$_inode" ] && [[ "$_inode" != *[!0-9]* ]] || { _inode=""; }
-    echo "$_inode"
 }
 
 # Adopt a lock directory that has no pid at all. A holder killed between
