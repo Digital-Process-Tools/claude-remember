@@ -55,7 +55,9 @@ HAIKU_PY = REPO_ROOT / "pipeline" / "summarizer.py"
 # #204 already covered, and the IDE port (reasoned: set when an IDE is
 # attached, not observed in that dump). Same names, same order as round 16's
 # shipped `haiku.strip_session_env`, minus the messaging handshake (round
-# 18). A future Claude Code session variable that is not here reaches the
+# 18), plus CLAUDE_CODE_EFFORT_LEVEL (#1128 -- not from round 16's dump or
+# `strip_session_env`; it outranks --effort and every settings-file source).
+# A future Claude Code session variable that is not here reaches the
 # summarizer until a release adds it to `_without_session_env` AND here.
 EXPECTED_SESSION_NAMES = (
     "CLAUDECODE",
@@ -68,7 +70,15 @@ EXPECTED_SESSION_NAMES = (
     "CLAUDE_CODE_EXECPATH",
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_SSE_PORT",
+    # #1128: outranks --effort and every settings-file source; a parent that
+    # pins "max" for its own sessions sends Haiku into max-effort thinking on
+    # a summarization task, which blows the 180s call timeout.
+    "CLAUDE_CODE_EFFORT_LEVEL",
 )
+# #1128: the *other* effort variable. The reporter measured that unsetting only
+# CLAUDE_CODE_EFFORT_LEVEL fixed the timeouts and left this one alone -- it is
+# not a Claude Code session variable, so it is inherited like any other.
+OTHER_EFFORT_VAR = "CLAUDE_EFFORT"
 # Round 18: inherited, no longer on the list.
 MESSAGING_HANDSHAKE = "CLAUDE_CODE_MESSAGING_TOKEN"
 
@@ -263,6 +273,25 @@ def test_child_inherits_an_arbitrary_variable(mock_run, monkeypatch, isolated_co
     seen = _capture(mock_run)
     call_haiku("p")
     assert seen[-1]["env"].get("REMEMBER_TEST_ARBITRARY_898") == "kept"
+
+
+@patch("pipeline.summarizer.subprocess.run")
+def test_effort_level_is_stripped_other_effort_var_is_inherited(
+        mock_run, monkeypatch, isolated_config):
+    """#1128: CLAUDE_CODE_EFFORT_LEVEL outranks --effort and every settings
+    file, so a parent that pins "max" sends Haiku into max-effort thinking on
+    a summarization task and blows the call's own timeout. CLAUDE_EFFORT is
+    the positive control: the reporter measured that unsetting only the
+    _LEVEL variable fixed it, and it is not a Claude Code session variable,
+    so it must reach the child like any other."""
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "max")
+    monkeypatch.setenv(OTHER_EFFORT_VAR, "max")
+    seen = _capture(mock_run)
+    call_haiku("p")
+    env = seen[-1]["env"]
+    assert "CLAUDE_CODE_EFFORT_LEVEL" not in env
+    assert env.get(OTHER_EFFORT_VAR) == "max", "positive control: not everything is stripped"
+    assert os.environ.get("CLAUDE_CODE_EFFORT_LEVEL") == "max", "restored after the spawn"
 
 
 @pytest.mark.parametrize("name", EXPECTED_SESSION_NAMES)

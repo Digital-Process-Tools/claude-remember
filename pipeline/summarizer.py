@@ -382,6 +382,15 @@ def _without_session_env():
     saved_messaging_socket = os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
     # The parent's IDE connection; the child would attach to the user's IDE.
     saved_sse_port = os.environ.pop("CLAUDE_CODE_SSE_PORT", None)
+    # #1128: outranks --effort and every settings-file source, so a parent
+    # session that pins "max" (the only way to keep max effort across
+    # sessions, since effortLevel stops at xhigh) sends Haiku into max-effort
+    # thinking on a summarization task -- NDC and consolidation then blow
+    # their 180s call timeout. CLAUDE_EFFORT is deliberately NOT on this
+    # list: the reporter measured that unsetting only this one variable fixed
+    # it, and CLAUDE_EFFORT is not a Claude Code session variable the child
+    # would otherwise look like a resumable part of.
+    saved_effort_level = os.environ.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
     try:
         yield
     finally:
@@ -405,6 +414,8 @@ def _without_session_env():
             os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = saved_messaging_socket
         if saved_sse_port is not None:
             os.environ["CLAUDE_CODE_SSE_PORT"] = saved_sse_port
+        if saved_effort_level is not None:
+            os.environ["CLAUDE_CODE_EFFORT_LEVEL"] = saved_effort_level
 
 
 @contextlib.contextmanager
