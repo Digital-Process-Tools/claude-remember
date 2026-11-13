@@ -186,13 +186,15 @@ _LOCK_PID_READ_TIMEOUT="${REMEMBER_LOCK_PID_READ_TIMEOUT:-2}"
 # the watchdog's own bound to zero iterations, which kills a read that
 # is not yet done after the FIRST poll-sleep interval (~50ms) --
 # indistinguishable, under any real load, from killing a holder that
-# was about to finish normally. Worse, the SAME bound of zero applies
-# to the takeover path's post-rename re-read (above): a legitimate
-# fresh pid write can lose that race to its own zero-length grace
-# period, reporting a false timeout that lets a second contender treat
-# the just-written winner as still-stuck and take the lock away from
-# it -- two processes then believe they hold the same lock. `-lt 1`
-# (not `-le 0`) is the natural phrasing of "require at least one real
+# was about to finish normally. The SAME bound of zero also reaches the
+# post-rename re-read every steal path shares (below): a legitimate
+# fresh pid write losing that race to its own zero-length grace period
+# reports a false timeout there too -- but every caller of that re-read
+# now treats ANY timeout as "refuse, restore, hand back" uniformly
+# (#1127, #1129), never as grounds to proceed with a steal, so a false
+# timeout here costs the winner an unnecessary refusal of its own claim,
+# not a second process believing it holds the same lock. `-lt 1` (not
+# `-le 0`) is the natural phrasing of "require at least one real
 # iteration"; `[ ]`'s own numeric comparison does not apply octal
 # rules (confirmed: a leading-zero value compares correctly here, only
 # the ARITHMETIC context below needs the `10#` forcing applied there).
@@ -423,13 +425,11 @@ _lock_read_pid_timeout() {
     # tells callers whether a read FINISHED (0) or not (1), and reserves
     # the content it finished with for a true success. The fast-fail case
     # then flows through the exact same code path the HUNG case already
-    # has at every caller: refuse the empty-pid steal, but remain
-    # recoverable through the existing age-gated takeover of a live-or-
-    # unreadable holder once the lock directory itself is older than
-    # `_LOCK_MAX_HOLD_SECONDS` -- the same bound a holder that is merely
-    # alive-but-wedged is already held to, deliberately, since a pid file
-    # that fails fast every time is exactly as uninformative about
-    # whether its holder is alive as one that times out every time.
+    # has at every caller: refuse, unconditionally, at any age (#1127,
+    # #1129) -- the age-gated takeover this once fell back to for a
+    # read failure was itself removed, since a timeout or a fast-fail
+    # read is exactly as uninformative about whether a holder is alive
+    # as the other, and neither is proof enough to steal or adopt.
     if [ "$_rc" -ne 0 ]; then
         rm -f "$_tmp" 2>/dev/null || true
         return 1
@@ -510,20 +510,52 @@ _lock_try_steal() {
         return 1
     fi
 
-    # Confirmed empty or non-numeric -- the read genuinely completed, so this
-    # is a fact rather than a guess, unlike the timeout case above. Two
-    # different things can cause it: the holder created the directory
-    # microseconds ago and has not written its pid yet (a live acquisition
-    # in flight), or the holder died between `mkdir` and writing its pid,
-    # leaving a pid file that exists and is empty forever (a second-review
-    # finding: `_lock_try_adopt` below only ever reclaims a MISSING pid
-    # file -- its very first line is `[ -e "${_dir}/pid" ] && return 1` --
-    # so a pid file that exists-but-is-empty has no other reclaim path at
-    # all). Age is what tells the two apart, same as the no-pid-file case
-    # `_lock_try_adopt` already covers; because the content was genuinely
-    # read, age-gating it here carries none of the ambiguity a timeout
-    # would.
-    if [ -z "$_pid" ] || [[ "$_pid" == *[!0-9]* ]]; then
+    # Confirmed empty, confirmed non-numeric, or a live holder -- the read
+    # genuinely completed, so each of these is a fact rather than a guess,
+    # unlike the timeout case above. Empty and non-numeric are NOT treated
+    # alike, on purpose (#1127 review finding 1, PR #1129): an EMPTY pid
+    # file can be a holder that created the directory microseconds ago and
+    # has not written its pid yet (a live acquisition in flight) -- or a
+    # faster contender's own noclobber-created-but-not-yet-written claim,
+    # passing through this exact same empty state as part of the ordinary
+    # steal/write sequence below. Age cannot tell those apart, and neither
+    # can content, because every legitimate winner's pid file is briefly
+    # EMPTY too: `( set -o noclobber; echo "$_LOCK_SELF" > "${_dir}/pid" )`
+    # creates the file before the shell's own write of "$_LOCK_SELF" lands
+    # in it. Two contenders racing a genuinely dead holder's empty pid file
+    # on an old-enough directory can each pass the age check, with one
+    # (X) winning the `mv` below, re-reading "" against its own "" and
+    # matching, then stalling in that exact create-but-not-yet-written
+    # window; a second (Y) then `mv`s X's brand-new empty claim, re-reads
+    # "" against ITS OWN "", also matches, and writes its own pid there
+    # successfully -- after which X's still-pending write lands in Y's
+    # claim through X's own already-open file descriptor. Both return 0.
+    # Reproduced by construction, not merely reasoned: nothing about this
+    # needs rare timing, since every winner's own write passes through the
+    # identical empty state every single time. An EMPTY pid file is
+    # therefore NEVER grounds to steal, at any age -- v0.45.0's own
+    # behaviour, restored for this one case; see `_lock_try_steal`'s
+    # unreadable-pid branch above for the same argument made once already
+    # about the read-failure case.
+    #
+    # Non-numeric (garbage, but non-empty) is kept age-gated, because the
+    # empty-vs-empty ambiguity above does not reproduce for it: no code
+    # in this file ever writes non-numeric content into a pid file -- every
+    # writer here (this function's own noclobber write, `_lock_try_adopt`'s)
+    # writes a real numeric pid, so a re-read of the renamed claim can only
+    # ever see the SAME garbage it saw before the rename (safe to steal),
+    # the empty intermediate state of some OTHER contender's write (`""`,
+    # which mismatches non-empty garbage and refuses), or that contender's
+    # own finished numeric pid (also mismatches and refuses) -- never a
+    # second copy of the SAME garbage string, which is the one case that
+    # could reopen this ambiguity and which nothing here can produce.
+    # `_lock_try_adopt` below only ever reclaims a MISSING pid file -- its
+    # very first line is `[ -e "${_dir}/pid" ] && return 1` -- so a pid
+    # file that exists but is garbage, or was dead-and-empty-forever before
+    # this fix, has no other reclaim path; the garbage case alone keeps one.
+    if [ -z "$_pid" ]; then
+        return 1
+    elif [[ "$_pid" == *[!0-9]* ]]; then
         [ "$(_lock_dir_age "$_dir")" -ge "$_LOCK_ADOPT_AFTER" ] || return 1
         # $_pid is left exactly as read -- NOT cleared to "" here. The
         # post-rename re-read below (`_seen != $_pid`) exists to confirm
@@ -1166,7 +1198,22 @@ _lock_release_impl() {
     fi
 
     _lock_self_set
-    if [ -n "$_pid" ] && [ "$_pid" != "$_LOCK_SELF" ]; then
+    # An EMPTY read is NOT "ownership unproven, proceed anyway" -- it used
+    # to skip this check entirely (`[ -n "$_pid" ]` false short-circuits
+    # the whole condition), which is review finding 2 on PR #1129: a live
+    # holder past _LOCK_MAX_HOLD_SECONDS, releasing legitimately, can read
+    # "${_dir}/pid" during the exact window a concurrent stealer's own
+    # noclobber write has created the path but not yet written into it
+    # (the same empty-create-before-write state finding 1, above, already
+    # names). That empty read used to sail through this check, then match
+    # "" against the stealer's own later-renamed claim at the `_seen !=
+    # $_pid` compare below -- also "" at that same instant -- and the
+    # release proceeded to `rm -rf` the directory out from under the
+    # stealer's in-flight takeover. A third process's `mkdir` then
+    # recreates the path while the stealer still believes it holds the
+    # original: two holders. An empty read proves nothing about ownership
+    # either way and must refuse, the same as a mismatched one already did.
+    if [ -z "$_pid" ] || [ "$_pid" != "$_LOCK_SELF" ]; then
         return 1
     fi
 
