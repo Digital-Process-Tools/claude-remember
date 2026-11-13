@@ -587,24 +587,22 @@ def test_an_unreadable_pid_file_is_refused_quickly_rather_than_hanging(
     )
 
 
-def test_a_permanently_dataless_pid_file_becomes_acquirable_once_old_enough(
+def test_a_permanently_dataless_pid_file_is_never_reclaimed_even_once_old_enough(
     tmp_path,
 ):
-    """Scheduler finding: the test above pins that a SINGLE timed-out read
-    must never be grounds to steal -- correct, since one timeout cannot
-    tell a merely-slow read from a permanently broken one. But refusing
-    EVERY read forever, with no recovery path at all, means a pid file
-    that genuinely never finishes reading (the actual #1103 shape -- a
-    dataless cloud-sync placeholder whose remote copy is gone for good)
-    makes `_lock_try_steal` refuse FOREVER: every later `lock_acquire`
-    times out at this exact point and logs "another save holds the lock,
-    skipping" permanently, just after 2s instead of ~60s (#1103 was made
-    faster, not fixed). This pins the recovery path: once the lock
-    directory is at least as old as `_LOCK_MAX_HOLD_SECONDS` AND the pid
-    file still refuses to finish reading, a later acquirer takes it over.
-    `REMEMBER_LOCK_MAX_HOLD_SECONDS=0` makes any real age qualify, the
-    same trick `test_a_live_but_permanently_hung_holder_is_eventually_
-    stolen_from` above already uses for the live-holder case.
+    """#1127: switched off. v0.45.1's own fix for this exact test pinned a
+    recovery path -- once the lock directory is at least as old as
+    `_LOCK_MAX_HOLD_SECONDS` AND the pid file still refuses to finish
+    reading, a later acquirer took it over -- and five review rounds in a
+    row (#1119, #1122, #1124/#1125, the reviews on the still-unmerged PR
+    #1126) each found a NEW two-simultaneous-holders interleaving in that
+    takeover, however it was tightened. The maintainer's call: refuse
+    unconditionally, at any age, the same as v0.45.0 -- a lock left behind
+    by a holder whose pid file can no longer be read now has to be
+    cleared by hand (delete the lock directory) rather than taken over
+    automatically. `REMEMBER_LOCK_MAX_HOLD_SECONDS=0` makes any real age
+    qualify, so this proves the refusal holds even in the one case that
+    used to be the recovery path's whole reason to exist.
     """
     lock_dir = tmp_path / "dataless-recoverable.lock"
     lock_dir.mkdir()
@@ -618,43 +616,31 @@ def test_a_permanently_dataless_pid_file_becomes_acquirable_once_old_enough(
         """,
         timeout=15,
     )
-    assert "ACQUIRED" in result.stdout, (
-        f"a permanently dataless pid file old enough to exceed "
-        f"_LOCK_MAX_HOLD_SECONDS must eventually become acquirable -- "
-        f"a timeout is not forever proof the holder is alive: "
+    assert "REFUSED" in result.stdout, (
+        f"a permanently dataless pid file must never be reclaimed "
+        f"automatically, however old the lock directory is -- a timeout "
+        f"is not proof the holder is dead: "
         f"{result.stdout!r} {result.stderr!r}"
     )
-    new_pid = (lock_dir / "pid").read_text(encoding="utf-8").strip()
-    assert new_pid.isdigit(), (
-        f"the takeover must leave a real, numeric pid behind, not the "
-        f"FIFO or something else: {new_pid!r}"
+    assert (lock_dir / "pid").exists(), (
+        "a refused steal must leave the original (FIFO) pid file in "
+        "place, not replace or remove it"
     )
 
 
-def test_concurrent_takeover_of_a_permanently_dataless_pid_file_has_one_winner(
+def test_concurrent_contenders_on_a_permanently_dataless_pid_file_never_steal(
     tmp_path,
 ):
-    """Safety counterpart to the test above: of N contenders that all see
-    the same permanently-stuck, old-enough pid file at once, exactly one
-    may win the takeover -- the same single-winner guarantee
-    `test_stale_takeover_has_exactly_one_winner` already pins for the
-    confirmed-dead-holder case, now exercised for the never-finishes-
-    reading case this issue adds.
-
-    The atomic `mv` of the pid file alone is NOT the whole guarantee
-    here, found by this exact test during development: a winner's own
-    pid write recreates the path an instant after its `mv`, and a
-    slower contender's `mv` can then grab that brand-new, healthy pid
-    file with nothing yet telling it apart from the stuck placeholder
-    it meant to steal -- reproduced directly as 7 of 8 contenders
-    "winning" before the fix. `_lock_try_steal` closes that by
-    re-reading the CLAIM the rename just produced (never the original
-    path again, since the original genuinely never finishes reading):
-    a real placeholder still times out identically on that re-read; a
-    fresh pid a faster winner already wrote resolves immediately, the
-    signal to restore it and refuse. This test is what the single-mv
-    comment next to that re-read in lib-lock.sh points back to.
-    """
+    """#1127: switched off. v0.45.1 pinned a single-winner guarantee here
+    (of N contenders racing the same permanently-stuck pid file, exactly
+    one won the takeover) -- but a winner existing at all is exactly what
+    five later review rounds in a row (#1119, #1122, #1124, #1125, and
+    the reviews on PR #1126) each found a new way to duplicate under
+    concurrency. The maintainer's call
+    removes the takeover outright rather than continuing to patch it:
+    with no takeover path left, every contender must refuse, every time,
+    a strictly stronger guarantee than "at most one winner" -- there is
+    never a winner to race over in the first place."""
     lock_dir = tmp_path / "dataless-race.lock"
     lock_dir.mkdir()
     os.mkfifo(lock_dir / "pid")
@@ -685,14 +671,65 @@ def test_concurrent_takeover_of_a_permanently_dataless_pid_file_has_one_winner(
         f"expected exactly {n} outcomes, one per contender: {lines!r}"
     )
     wins = [line for line in lines if line.startswith("STOLE")]
-    assert len(wins) == 1, (
-        f"exactly one of {n} concurrent takeovers of the same stuck pid "
-        f"file must win -- got {len(wins)}: {lines!r}"
+    assert len(wins) == 0, (
+        f"a permanently dataless pid file must never be stolen by any "
+        f"contender, concurrent or not -- got {len(wins)} winner(s): "
+        f"{lines!r}"
     )
-    new_pid = (lock_dir / "pid").read_text(encoding="utf-8").strip()
-    assert new_pid.isdigit(), (
-        f"after the race, the pid file must hold a real numeric pid, "
-        f"not be left empty or dataless: {new_pid!r}"
+    assert (lock_dir / "pid").exists(), (
+        "every contender refusing must leave the original (FIFO) pid "
+        "file in place"
+    )
+
+
+def test_concurrent_contenders_on_a_dead_holders_pid_have_one_winner(
+    tmp_path,
+):
+    """Positive control for the test above (#1129 review finding 8): same
+    harness, same N, but a READABLE pid naming a definitely-dead process
+    instead of a permanently-stuck FIFO. Exactly one of N concurrent
+    contenders must win -- the ordinary single-winner guarantee
+    `test_stale_takeover_has_exactly_one_winner` already pins for this
+    shape. Without this, the all-REFUSED assertion in the test above
+    could pass against a broken harness that never calls
+    `_lock_try_steal` at all, or one that always returns non-zero
+    regardless of input -- this proves the harness can show a winner
+    when a winner is correct, not just REFUSED either way."""
+    lock_dir = tmp_path / "dead-holder-race.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("111111", encoding="utf-8")
+    events_file = tmp_path / "events-control.log"
+    n = 8
+    result = _run(
+        f"""
+        export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
+        export REMEMBER_LOCK_PID_READ_TIMEOUT=1
+        source {LIB_LOCK_SH}
+        contend() {{
+            if _lock_try_steal "{lock_dir}"; then
+                echo "STOLE $1" >> "{events_file}"
+            else
+                echo "REFUSED $1" >> "{events_file}"
+            fi
+        }}
+        for i in $(seq 1 {n}); do
+            contend "$i" &
+        done
+        wait
+        """,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = events_file.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == n, (
+        f"expected exactly {n} outcomes, one per contender: {lines!r}"
+    )
+    wins = [line for line in lines if line.startswith("STOLE")]
+    assert len(wins) == 1, (
+        f"exactly one of {n} concurrent contenders racing a dead "
+        f"holder's readable pid must win -- a harness that cannot show "
+        f"a winner here proves nothing by also showing zero winners "
+        f"elsewhere: got {len(wins)}: {lines!r}"
     )
 
 
@@ -918,15 +955,27 @@ def test_a_reader_that_ignores_sigterm_is_still_bounded(tmp_path):
     )
 
 
-def test_a_confirmed_empty_and_old_pid_file_is_still_reclaimed(tmp_path):
-    """Second-review finding: an earlier cut of the timeout-refusal fix
-    collapsed the confirmed-empty-pid branch and the timed-out-read branch
-    into one unconditional refusal, which also removed the ONLY path that
-    ever reclaims a pid file that exists and is empty forever (a holder
-    killed between `mkdir` and writing its pid) -- `_lock_try_adopt`
-    explicitly refuses whenever the pid file exists at all, timed out or
-    not. A confirmed-by-a-completed-read empty pid is a fact, not a guess
-    like a timeout is, so it must still be reclaimable once old enough."""
+def test_a_confirmed_empty_pid_file_is_never_reclaimed_even_old(tmp_path):
+    """#1129 review finding 1: a confirmed-empty pid file used to be
+    reclaimable once old enough (the ONLY path that ever reclaimed a pid
+    file left empty forever by a holder killed between `mkdir` and
+    writing its pid, since `_lock_try_adopt` explicitly refuses whenever
+    the pid file exists at all) -- but a confirmed-read "" is NOT
+    distinguishable from the empty state every winner's own pid file
+    passes through for a moment, between its `noclobber` create and the
+    write landing in it (see `_lock_try_steal`'s own comment on this
+    branch). Two contenders racing a genuinely dead holder's empty pid
+    file on an old-enough directory can each pass the age check, with
+    one winning the `mv` and re-reading "" against its own "" match,
+    stalling in that exact create-but-not-yet-written window, while a
+    second `mv`s the first one's brand-new empty claim, also matches ""
+    against its own "", and writes ITS pid there successfully -- after
+    which the first contender's still-pending write lands through its
+    own already-open descriptor into the second's claim. Both return 0.
+    An empty pid file must therefore never be reclaimed, at any age --
+    the liveness cost (a holder that died mid-acquisition now needs the
+    lock directory cleared by hand) is accepted in exchange for never
+    producing two holders."""
     lock_dir = tmp_path / "confirmed-empty.lock"
     lock_dir.mkdir()
     (lock_dir / "pid").write_text("", encoding="utf-8")
@@ -938,9 +987,9 @@ def test_a_confirmed_empty_and_old_pid_file_is_still_reclaimed(tmp_path):
     _LOCK_ADOPT_AFTER=5
     lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
     """)
-    assert "ACQUIRED" in result.stdout, (
-        f"a confirmed-empty, old pid file must still be reclaimable: "
-        f"{result.stdout!r} {result.stderr!r}"
+    assert "REFUSED" in result.stdout, (
+        f"a confirmed-empty pid file must never be reclaimed, however "
+        f"old the lock directory is: {result.stdout!r} {result.stderr!r}"
     )
 
 
@@ -1074,6 +1123,40 @@ def test_release_refuses_rather_than_removes_on_a_timed_out_pid_read(tmp_path):
     )
     assert lock_dir.exists(), (
         "a refused release must leave the lock directory in place"
+    )
+
+
+def test_release_refuses_rather_than_removes_on_a_confirmed_empty_pid_read(
+    tmp_path,
+):
+    """#1129 review finding 2: a release whose own pid read COMPLETES but
+    comes back empty used to skip the ownership check entirely --
+    `[ -n "$_pid" ] && [ "$_pid" != "$_LOCK_SELF" ]` is false whenever
+    `$_pid` is "", so the whole condition short-circuits and the
+    function proceeds as though ownership were confirmed. An empty read
+    here is not a fact about ownership either way: it is exactly the
+    state a concurrent stealer's own in-flight `noclobber` write passes
+    through (created, not yet written), and finding 1 above shows it is
+    also exactly the state a long-dead holder's pid file can sit in
+    forever. A release that reads "" must refuse, the same as a release
+    that reads a mismatched pid already does -- never proceed as if
+    ownership were simply unproven-but-fine."""
+    lock_dir = tmp_path / "confirmed-empty-release.lock"
+    lock_dir.mkdir()
+    (lock_dir / "pid").write_text("", encoding="utf-8")
+
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    lock_release "{lock_dir}" && echo RELEASED || echo REFUSED
+    """)
+    assert "REFUSED" in result.stdout, (
+        f"a release whose own pid read comes back confirmed-empty must "
+        f"refuse, not treat the empty read as proof of ownership: "
+        f"{result.stdout!r} {result.stderr!r}"
+    )
+    assert lock_dir.exists(), (
+        "a refused release must leave the lock directory in place, not "
+        "rm -rf it out from under whatever is actually using it"
     )
 
 
@@ -1981,18 +2064,18 @@ def test_a_readable_pid_of_a_live_holder_is_the_positive_control_1119(tmp_path):
         holder.wait(timeout=10)
 
 
-def test_a_persistently_unreadable_pid_is_still_recoverable_once_old_enough_1119(
+def test_a_persistently_unreadable_pid_is_never_reclaimed_even_once_old_enough_1119(
     tmp_path,
 ):
-    """#1119 fix direction: a fast-failing read must be refused like a
-    hung one, never treated as confirmed-empty -- but #1103's own
-    recovery must still work for a pid file that persistently cannot be
-    read: once the lock directory is at least as old as
-    `_LOCK_MAX_HOLD_SECONDS`, it is still reclaimable, the same recovery
-    path a permanently-hanging read already has
-    (test_a_permanently_dataless_pid_file_becomes_acquirable_once_old_enough).
-    Without this, refusing a fast-fail read forever would trade a security
-    regression for a permanent, unrecoverable outage."""
+    """#1127: switched off. #1119's own fix pinned a recovery path here --
+    once the lock directory was at least as old as `_LOCK_MAX_HOLD_SECONDS`,
+    a persistently unreadable pid file was still reclaimable, the same
+    recovery path the dataless-FIFO case had
+    (test_a_permanently_dataless_pid_file_is_never_reclaimed_even_once_old_enough).
+    Both recovery paths are switched off together: refusing forever is now
+    the accepted liveness cost, in exchange for never duplicating a
+    holder -- the pattern five review rounds (#1119, #1122, #1124/#1125,
+    PR #1126) kept finding a new way to do."""
     reason = _chmod_unreadable_skip_reason()
     if reason:
         pytest.skip(reason)
@@ -2007,10 +2090,9 @@ def test_a_persistently_unreadable_pid_is_still_recoverable_once_old_enough_1119
         source {LIB_LOCK_SH}
         lock_acquire "{lock_dir}" 0 && echo ACQUIRED || echo REFUSED
         """)
-        assert "ACQUIRED" in result.stdout, (
-            f"a persistently unreadable pid file old enough to exceed "
-            f"_LOCK_MAX_HOLD_SECONDS must still be recoverable -- a fast "
-            f"read failure must not be refused FOREVER either: "
+        assert "REFUSED" in result.stdout, (
+            f"a persistently unreadable pid file must never be reclaimed "
+            f"automatically, however old the lock directory is: "
             f"{result.stdout!r} {result.stderr!r}"
         )
     finally:
@@ -2069,39 +2151,20 @@ def test_a_fast_failing_pid_read_via_the_mktemp_fallback_also_refuses_1119(
         holder.wait(timeout=10)
 
 
-def test_a_fast_failing_claim_reread_does_not_steal_a_racing_winners_pid_1122(
-    tmp_path,
-):
-    """#1122, follow-on to #1119/#1120 landing on a DIFFERENT call site in
-    the same function. `_lock_try_steal`'s SECOND read -- of `$_claim`, the
-    pid file this contender just renamed away from "${_dir}/pid" -- is
-    supposed to tell apart "still the same stuck placeholder I saw on my
-    first read" (safe to steal) from "a faster contender's own noclobber
-    write already recreated \"${_dir}/pid\" in the gap between my dir-age
-    check and my own `mv`, and my `mv` grabbed THAT instead" (unsafe --
-    hand back, per the existing comment right above this re-read).
-    #1119/#1120 made every read failure at this re-read report identically
-    whether it is a real timeout or a fast EACCES/EIO/cloud-sync refusal,
-    so a fast-failing re-read of a genuine winner's brand-new pid -- which
-    can itself happen to be unreadable for a moment, unrelated to whether
-    it is actually stuck -- fell through to the noclobber write below and
-    clobbered the winner's lock: two simultaneous holders.
-
-    The real race (#1101/#1103's own repro: N=8 concurrent contenders, 7 of
-    8 "won") depends on OS scheduling luck too fine-grained to pin
-    deterministically in a single-process test. This reproduces the exact
-    mechanism instead of the timing by wrapping `_lock_file_inode`, the
-    fix's own helper: its FIRST call is the "before" snapshot the fix takes
-    right before the `mv` (of whatever is CURRENTLY at "${_dir}/pid", still
-    the original stuck placeholder at that point) -- the wrapper records
-    the real answer for that call, THEN swaps in a "winner's" pid file as
-    a side effect, simulating a faster contender's own win landing in
-    exactly the window between this contender's pre-mv snapshot and
-    the `mv` that follows it. The `mv` therefore grabs the SWAPPED file,
-    not the one the snapshot was taken of -- the real mismatch the fix
-    exists to catch. The swapped-in file is ALSO chmod 000, landing on
-    this issue's fast-fail shape rather than #1119's hang shape.
-    """
+def test_a_persistently_unreadable_pid_file_is_never_stolen_1122(tmp_path):
+    """#1122/#1127 consolidated. #1122's own fix told apart "still the
+    same stuck placeholder" from "a faster contender's own write already
+    recreated the pid file" by re-reading the renamed claim and comparing
+    inodes -- a mechanism that only mattered because a successful takeover
+    was still reachable at all. #1127 removes the takeover outright (five
+    review rounds in a row -- #1119, #1122, #1124, #1125, and the reviews
+    on pull request #1126 -- each found a NEW two-simultaneous-holders
+    interleaving in it, however it was tightened), so the inode-comparison
+    machinery this test used to exercise no longer exists in
+    `_lock_try_steal` at all: a persistently unreadable pid file is
+    refused, unconditionally, with or without a racing contender.
+    REMEMBER_LOCK_MAX_HOLD_SECONDS=0 makes every real age qualify, the
+    strongest case the old takeover ever had to work with."""
     reason = _chmod_unreadable_skip_reason()
     if reason:
         pytest.skip(reason)
@@ -2110,64 +2173,12 @@ def test_a_fast_failing_claim_reread_does_not_steal_a_racing_winners_pid_1122(
     pid_file = lock_dir / "pid"
     pid_file.write_text("111111", encoding="utf-8")
     pid_file.chmod(0o000)
-    winner_pid_text = "222222"
     try:
         result = _run(
             f"""
             export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
             export REMEMBER_LOCK_PID_READ_TIMEOUT=1
             source {LIB_LOCK_SH}
-            eval "$(declare -f _lock_file_inode | sed '1s/^_lock_file_inode ()/_orig_lock_file_inode ()/')"
-            # A plain shell variable will NOT do for the once-only guard
-            # below: `_lock_file_inode` is always called via command
-            # substitution ($(...)) at its real call sites in lib-lock.sh,
-            # which forks a subshell, and a variable set inside that
-            # subshell is gone the instant the subshell exits -- so
-            # `_swap_done=1` would never be visible to the next call and
-            # the swap would fire on EVERY call, not just the first. A
-            # file on disk survives across subshells; a variable does not.
-            _swap_marker="{lock_dir}/.swap-done"
-            rm -f "$_swap_marker"
-            _lock_file_inode() {{
-                local _result
-                _result=$(_orig_lock_file_inode "$@")
-                if [ ! -e "$_swap_marker" ]; then
-                    touch "$_swap_marker"
-                    # Simulate a faster contender's own win landing in the
-                    # gap between THIS contender's pre-mv snapshot (just
-                    # taken, above, of the file as it stood a moment ago)
-                    # and the `mv` that is about to run next: a legitimate
-                    # winner's pid, which ALSO happens to fail fast to read
-                    # right now -- #1122's own shape, not #1119's hang.
-                    #
-                    # Built via mktemp + mv, never rm-then-create in place:
-                    # on a bitmap allocator (ext4's behaviour, observed on
-                    # the ubuntu-24.04/py3.9 CI leg -- this exact test went
-                    # STOLE there despite being green on this machine's
-                    # APFS, 2000/2000 rm+recreate trials showing zero
-                    # collisions locally), freeing an inode and immediately
-                    # creating a new file in the same directory can hand
-                    # back that SAME inode number, with nothing else
-                    # allocated in between to prevent it. That collision
-                    # makes the real fix's own inode comparison below see
-                    # "unchanged" for a file that was, in fact, swapped --
-                    # the exact ambiguity this test exists to force, except
-                    # forced onto the test's own harness instead of the
-                    # code under test. Creating the replacement under a
-                    # temp name WHILE the original "pid" file still exists
-                    # (not yet unlinked) guarantees the temp file gets an
-                    # inode distinct from the original's -- two live files
-                    # cannot share one inode -- and `mv` then carries that
-                    # already-distinct inode into place atomically, so the
-                    # swap is observably different by construction, not by
-                    # allocator luck.
-                    _winner_tmp=$(mktemp "{lock_dir}/.winner-pid.XXXXXX")
-                    printf '%s' "{winner_pid_text}" > "$_winner_tmp"
-                    chmod 000 "$_winner_tmp"
-                    mv -f "$_winner_tmp" "{lock_dir}/pid"
-                fi
-                echo "$_result"
-            }}
             if _lock_try_steal "{lock_dir}"; then
                 echo STOLE
             else
@@ -2177,73 +2188,130 @@ def test_a_fast_failing_claim_reread_does_not_steal_a_racing_winners_pid_1122(
             timeout=15,
         )
         assert "REFUSED" in result.stdout, (
-            f"a fast-failing re-read of the claim must not be read as "
-            f"confirmed-still-stuck when a faster contender's own pid "
-            f"(itself also unreadable right now) was swapped in first -- "
-            f"stealing here clobbers a real winner's lock, producing two "
-            f"holders: {result.stdout!r} {result.stderr!r}"
+            f"a persistently unreadable pid file must never be stolen, "
+            f"with or without a racing contender: "
+            f"{result.stdout!r} {result.stderr!r}"
         )
         assert pid_file.exists(), (
-            f"the hand-back must restore A pid file, not leave the lock "
-            f"pid-less: {result.stdout!r} {result.stderr!r}"
+            f"a refused steal must leave A pid file in place, not leave "
+            f"the lock pid-less: {result.stdout!r} {result.stderr!r}"
         )
     finally:
         if pid_file.exists():
             pid_file.chmod(0o644)
-    assert pid_file.read_text(encoding="utf-8") == winner_pid_text, (
-        f"the winner's own pid must survive untouched, not be overwritten "
-        f"by the losing contender: got "
-        f"{pid_file.read_text(encoding='utf-8')!r}, expected "
-        f"{winner_pid_text!r}: {result.stdout!r} {result.stderr!r}"
+    assert pid_file.read_text(encoding="utf-8") == "111111", (
+        f"the original pid file must survive untouched: "
+        f"{pid_file.read_text(encoding='utf-8')!r}"
     )
 
 
-def test_a_persistently_unreadable_claim_with_no_race_still_steals_1122(
+def test_a_readable_pid_of_a_dead_process_is_the_positive_control_1122(
     tmp_path,
 ):
-    """Positive control for the test above, same harness and bounds: with
-    no faster contender ever touching the pid file (no `_lock_dir_age`
-    override), the re-read of `$_claim` fails the same way the first read
-    did -- genuinely, consistently stuck -- and the steal must still
-    succeed. Without this, the fix above could satisfy its own assertion
-    by refusing every steal unconditionally, which would trade #1122's bug
-    for #1119's own already-rejected failure mode (a fast-failing pid file
-    becoming permanently unstealable) -- the same control shape as
-    test_a_readable_pid_of_a_live_holder_is_the_positive_control_1119,
-    proving this harness can show STOLE at all, not just REFUSED
-    regardless of what happened."""
-    reason = _chmod_unreadable_skip_reason()
-    if reason:
-        pytest.skip(reason)
-    lock_dir = tmp_path / "steal-no-race.lock"
+    """Positive control for the test above (#1129 review finding 8): same
+    harness and bounds, but a READABLE pid file naming a definitely-dead
+    process must still be stolen. Without this, the REFUSED assertion
+    above could pass against a broken harness that never calls
+    `_lock_try_steal` at all, or one that always returns non-zero --
+    this proves the harness can show STOLE when stealing is correct,
+    not just REFUSED regardless of what actually happened."""
+    lock_dir = tmp_path / "dead-holder.lock"
     lock_dir.mkdir()
     pid_file = lock_dir / "pid"
+    # 111111 is not a real pid on any machine this suite runs on -- kill -0
+    # on it always fails, the same "confirmed dead" shape
+    # test_stale_lock_from_a_dead_holder_is_taken_over already relies on.
     pid_file.write_text("111111", encoding="utf-8")
-    pid_file.chmod(0o000)
-    try:
-        result = _run(
-            f"""
-            export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
-            export REMEMBER_LOCK_PID_READ_TIMEOUT=1
-            source {LIB_LOCK_SH}
-            if _lock_try_steal "{lock_dir}"; then
-                echo STOLE
-            else
-                echo REFUSED
-            fi
-            """,
-            timeout=15,
-        )
-        assert "STOLE" in result.stdout, (
-            f"a persistently unreadable pid file with no race must still "
-            f"be stealable once old enough -- refusing here would trade "
-            f"#1122's bug for the permanent-outage mistake #1119 already "
-            f"avoided at the first read: {result.stdout!r} {result.stderr!r}"
-        )
-    finally:
-        pid_file.chmod(0o644)
-    new_pid = pid_file.read_text(encoding="utf-8").strip()
-    assert new_pid.isdigit(), (
-        f"after a real steal, the pid file must hold this contender's own "
-        f"numeric pid, not be left empty or non-numeric: {new_pid!r}"
+    result = _run(
+        f"""
+        export REMEMBER_LOCK_MAX_HOLD_SECONDS=0
+        export REMEMBER_LOCK_PID_READ_TIMEOUT=1
+        source {LIB_LOCK_SH}
+        if _lock_try_steal "{lock_dir}"; then
+            echo STOLE
+        else
+            echo REFUSED
+        fi
+        """,
+        timeout=15,
     )
+    assert "STOLE" in result.stdout, (
+        f"a readable pid naming a dead process must still be stolen -- "
+        f"a harness that cannot show this proves nothing by also "
+        f"showing REFUSED elsewhere: {result.stdout!r} {result.stderr!r}"
+    )
+    new_pid = pid_file.read_text(encoding="utf-8").strip()
+    assert new_pid.isdigit() and new_pid != "111111", (
+        f"after a real steal, the pid file must hold the stealer's own "
+        f"numeric pid, not the dead holder's: {new_pid!r}"
+    )
+
+
+def test_lock_restore_claim_never_clobbers_an_existing_destination(tmp_path):
+    """#1127 review finding 3, PR #1129: every restore-by-rename site in
+    lib-lock.sh used to be a bare `mv "$_claim" "$_dest"`. `mv` to an
+    EXISTING destination always succeeds and always overwrites,
+    silently -- so a legitimate pid a faster process wrote into `$_dest`
+    in the window between whatever existence check preceded the mv and
+    the mv itself was clobbered with no error, and a later contender
+    could then steal the clobbered, stale content: two holders.
+    `_lock_restore_claim` closes this with `ln` (a hard link), which
+    POSIX requires to fail with EEXIST if the destination exists.
+
+    This exercises the state a race leaves behind -- a destination that
+    already exists when the restore is attempted -- the same state
+    regardless of how many nanoseconds separated the two writes, so it
+    needs no concurrency to be deterministic."""
+    lock_dir = tmp_path / "restore-race.lock"
+    lock_dir.mkdir()
+    dest = lock_dir / "pid"
+    claim = lock_dir / "pid.stealing.111111"
+    dest.write_text("900000", encoding="utf-8")
+    claim.write_text("333333", encoding="utf-8")
+
+    # Positive control for the bug this replaces: a bare `mv`, the exact
+    # shape every restore site in lib-lock.sh used before this fix, DOES
+    # silently clobber here -- proving this scenario is a real
+    # regression test, not one that would pass regardless of mechanism.
+    _run(f'mv "{claim}" "{dest}" 2>/dev/null')
+    assert dest.read_text(encoding="utf-8") == "333333", (
+        "sanity check failed: a bare mv must still clobber in this "
+        "harness, or the assertion below proves nothing"
+    )
+
+    # Re-create the same starting state for the real function under test.
+    dest.write_text("900000", encoding="utf-8")
+    claim.write_text("333333", encoding="utf-8")
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _lock_restore_claim "{claim}" "{dest}" && echo RESTORED || echo DISCARDED
+    """)
+    assert "DISCARDED" in result.stdout, (
+        f"a restore onto an existing destination must discard its own "
+        f"claim, never overwrite it: {result.stdout!r} {result.stderr!r}"
+    )
+    assert dest.read_text(encoding="utf-8") == "900000", "winner must survive"
+    assert not claim.exists(), "a discarded claim must not linger as litter"
+
+
+def test_lock_restore_claim_restores_when_nothing_is_in_the_way(tmp_path):
+    """Positive control for the test above: with no race (the destination
+    genuinely absent), the SAME function must still restore the claim --
+    otherwise it could satisfy the no-clobber assertion by refusing
+    unconditionally, which would strand every abandoned claim forever."""
+    lock_dir = tmp_path / "restore-no-race.lock"
+    lock_dir.mkdir()
+    dest = lock_dir / "pid"
+    claim = lock_dir / "pid.stealing.111111"
+    claim.write_text("333333", encoding="utf-8")
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _lock_restore_claim "{claim}" "{dest}" && echo RESTORED || echo DISCARDED
+    """)
+    assert "RESTORED" in result.stdout, (
+        f"a restore with nothing in the way must still succeed -- "
+        f"refusing unconditionally would strand every abandoned claim "
+        f"forever: {result.stdout!r} {result.stderr!r}"
+    )
+    assert dest.read_text(encoding="utf-8") == "333333", "restored content wrong"
+    assert not claim.exists(), "a successful restore must not leave the claim behind too"
