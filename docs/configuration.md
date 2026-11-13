@@ -110,10 +110,14 @@ does not pass as that session
 back afterwards: `CLAUDECODE`, `CLAUDE_JOB_DIR`, `CLAUDE_PROJECT_DIR`,
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_CHILD_SESSION`,
 `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_MESSAGING_SOCKET`,
-`CLAUDE_CODE_SSE_PORT` -- the reason for each is a comment beside the code in
-`pipeline/summarizer.py`. `CLAUDE_CODE_MESSAGING_TOKEN`, the handshake paired with the messaging
-socket, is not on the list and reaches the nested call: with the socket removed, the nested
-call has no channel to present it on. Your login credential is never on that list
+`CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_EFFORT_LEVEL` -- the reason for each is a comment beside
+the code in `pipeline/summarizer.py`. `CLAUDE_CODE_MESSAGING_TOKEN`, the handshake paired with
+the messaging socket, is not on the list and reaches the nested call: with the socket removed,
+the nested call has no channel to present it on. `CLAUDE_EFFORT` is not on the list either and
+also reaches the nested call -- only `CLAUDE_CODE_EFFORT_LEVEL` outranks `--effort` and every
+settings-file source, so only it needs stripping
+([#1128](https://github.com/Digital-Process-Tools/claude-remember/issues/1128)). Your login
+credential is never on that list
 ([#131](https://github.com/Digital-Process-Tools/claude-remember/issues/131)); provider
 settings such as Bedrock selection are not either, so they reach the nested call
 ([#316](https://github.com/Digital-Process-Tools/claude-remember/issues/316)). To keep any

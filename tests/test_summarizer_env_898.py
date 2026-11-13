@@ -55,7 +55,9 @@ HAIKU_PY = REPO_ROOT / "pipeline" / "summarizer.py"
 # #204 already covered, and the IDE port (reasoned: set when an IDE is
 # attached, not observed in that dump). Same names, same order as round 16's
 # shipped `haiku.strip_session_env`, minus the messaging handshake (round
-# 18). A future Claude Code session variable that is not here reaches the
+# 18), plus CLAUDE_CODE_EFFORT_LEVEL (#1128 -- not from round 16's dump or
+# `strip_session_env`; it outranks --effort and every settings-file source).
+# A future Claude Code session variable that is not here reaches the
 # summarizer until a release adds it to `_without_session_env` AND here.
 EXPECTED_SESSION_NAMES = (
     "CLAUDECODE",
