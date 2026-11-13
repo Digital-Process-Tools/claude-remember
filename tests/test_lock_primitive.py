@@ -2245,3 +2245,73 @@ def test_a_readable_pid_of_a_dead_process_is_the_positive_control_1122(
         f"after a real steal, the pid file must hold the stealer's own "
         f"numeric pid, not the dead holder's: {new_pid!r}"
     )
+
+
+def test_lock_restore_claim_never_clobbers_an_existing_destination(tmp_path):
+    """#1127 review finding 3, PR #1129: every restore-by-rename site in
+    lib-lock.sh used to be a bare `mv "$_claim" "$_dest"`. `mv` to an
+    EXISTING destination always succeeds and always overwrites,
+    silently -- so a legitimate pid a faster process wrote into `$_dest`
+    in the window between whatever existence check preceded the mv and
+    the mv itself was clobbered with no error, and a later contender
+    could then steal the clobbered, stale content: two holders.
+    `_lock_restore_claim` closes this with `ln` (a hard link), which
+    POSIX requires to fail with EEXIST if the destination exists.
+
+    This exercises the state a race leaves behind -- a destination that
+    already exists when the restore is attempted -- the same state
+    regardless of how many nanoseconds separated the two writes, so it
+    needs no concurrency to be deterministic."""
+    lock_dir = tmp_path / "restore-race.lock"
+    lock_dir.mkdir()
+    dest = lock_dir / "pid"
+    claim = lock_dir / "pid.stealing.111111"
+    dest.write_text("900000", encoding="utf-8")
+    claim.write_text("333333", encoding="utf-8")
+
+    # Positive control for the bug this replaces: a bare `mv`, the exact
+    # shape every restore site in lib-lock.sh used before this fix, DOES
+    # silently clobber here -- proving this scenario is a real
+    # regression test, not one that would pass regardless of mechanism.
+    _run(f'mv "{claim}" "{dest}" 2>/dev/null')
+    assert dest.read_text(encoding="utf-8") == "333333", (
+        "sanity check failed: a bare mv must still clobber in this "
+        "harness, or the assertion below proves nothing"
+    )
+
+    # Re-create the same starting state for the real function under test.
+    dest.write_text("900000", encoding="utf-8")
+    claim.write_text("333333", encoding="utf-8")
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _lock_restore_claim "{claim}" "{dest}" && echo RESTORED || echo DISCARDED
+    """)
+    assert "DISCARDED" in result.stdout, (
+        f"a restore onto an existing destination must discard its own "
+        f"claim, never overwrite it: {result.stdout!r} {result.stderr!r}"
+    )
+    assert dest.read_text(encoding="utf-8") == "900000", "winner must survive"
+    assert not claim.exists(), "a discarded claim must not linger as litter"
+
+
+def test_lock_restore_claim_restores_when_nothing_is_in_the_way(tmp_path):
+    """Positive control for the test above: with no race (the destination
+    genuinely absent), the SAME function must still restore the claim --
+    otherwise it could satisfy the no-clobber assertion by refusing
+    unconditionally, which would strand every abandoned claim forever."""
+    lock_dir = tmp_path / "restore-no-race.lock"
+    lock_dir.mkdir()
+    dest = lock_dir / "pid"
+    claim = lock_dir / "pid.stealing.111111"
+    claim.write_text("333333", encoding="utf-8")
+    result = _run(f"""
+    source {LIB_LOCK_SH}
+    _lock_restore_claim "{claim}" "{dest}" && echo RESTORED || echo DISCARDED
+    """)
+    assert "RESTORED" in result.stdout, (
+        f"a restore with nothing in the way must still succeed -- "
+        f"refusing unconditionally would strand every abandoned claim "
+        f"forever: {result.stdout!r} {result.stderr!r}"
+    )
+    assert dest.read_text(encoding="utf-8") == "333333", "restored content wrong"
+    assert not claim.exists(), "a successful restore must not leave the claim behind too"

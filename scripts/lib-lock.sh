@@ -446,6 +446,34 @@ _lock_read_pid_timeout() {
     return 0
 }
 
+# Restore (or discard) a claim file at <dest> without ever silently
+# clobbering a pid some other process already wrote there in the
+# meantime (#1127 review finding 3, PR #1129). A plain `mv "$_claim"
+# "$_dest"` always succeeds and always OVERWRITES an existing
+# destination with no error -- so a blind restore can silently replace
+# a legitimate pid a faster acquirer just wrote in the meantime.
+_lock_restore_claim() {
+    local _claim="$1" _dest="$2"
+    if ln "$_claim" "$_dest" 2>/dev/null; then
+        rm -f "$_claim" 2>/dev/null || true
+        return 0
+    fi
+    if [ -e "$_dest" ]; then
+        # Something is genuinely there now -- a race, not a tool failure.
+        # Its content won; ours did not. This claim's owner is THIS
+        # process, alive by construction, so nothing else in this file
+        # will ever sweep it up on its own -- drop it here.
+        rm -f "$_claim" 2>/dev/null || true
+        return 1
+    fi
+    # <dest> is still absent, so `ln` itself did not work: no hard-link
+    # support on this filesystem (FAT/exFAT and similar), not a race.
+    # Never fall back to `mv` -- that would reopen exactly the clobber
+    # this function exists to close. Leave the claim in place and
+    # refuse instead.
+    return 1
+}
+
 # Take a stale lock away from a dead holder. Returns 0 only for the single
 # process that won the rename — everyone else gets 1 and keeps waiting.
 _lock_try_steal() {
@@ -470,14 +498,19 @@ _lock_try_steal() {
             _owner="${_abandoned##*.}"
             [[ "$_owner" == *[!0-9]* ]] && continue
             kill -0 "$_owner" 2>/dev/null && continue
-            # First dead claim becomes the pid again; any further ones are
-            # litter from earlier abandoned takeovers — drop them rather than
-            # leave them accumulating in the lock directory forever.
-            if [ ! -e "${_dir}/pid" ]; then
-                mv "$_abandoned" "${_dir}/pid" 2>/dev/null || true
-            else
-                rm -f "$_abandoned" 2>/dev/null || true
-            fi
+            # First dead claim restores the pid; any further ones are
+            # litter from earlier abandoned takeovers. #1127 review finding
+            # 3: the `[ ! -e ... ]` guard this replaced, right before a
+            # separate `mv`, left exactly the TOCTOU window its own name
+            # says -- a legitimate pid write landing between the check and
+            # the move was silently overwritten with no error.
+            # `_lock_restore_claim`'s `ln` makes the existence check and
+            # the restore one atomic step, and decides on its own whether
+            # this claim is debris (its own internal existence check on an
+            # `ln` failure already covers the "already restored by an
+            # earlier iteration of this same loop" case the old explicit
+            # else-branch handled).
+            _lock_restore_claim "$_abandoned" "${_dir}/pid" || true
         done
     fi
 
@@ -595,12 +628,12 @@ _lock_try_steal() {
     # "could not confirm" and "confirmed identical" collapse into the same
     # branch is precisely the self-review finding above, one line later.
     if ! _lock_read_pid_timeout "$_claim"; then
-        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        _lock_restore_claim "$_claim" "${_dir}/pid" || true
         return 1
     fi
     _seen="$_LOCK_PID_READ_RESULT"
     if [ "$_seen" != "$_pid" ]; then
-        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        _lock_restore_claim "$_claim" "${_dir}/pid" || true
         return 1
     fi
 
@@ -1266,8 +1299,11 @@ _lock_release_impl() {
         # restoring $_claim's real content is what puts the new owner's
         # pid back where it belongs -- never our own stale belief, which
         # is why this restores $_claim unmodified rather than writing
-        # $_pid.
-        mv "$_claim" "${_dir}/pid" 2>/dev/null || true
+        # $_pid. #1127 review finding 3: that restore used to be a bare
+        # `mv`, which can silently clobber a FOURTH process's own
+        # legitimate pid if it acquires in the gap between this capture
+        # and the restore -- `_lock_restore_claim` makes that gap atomic.
+        _lock_restore_claim "$_claim" "${_dir}/pid" || true
         return 1
     fi
     # An ADOPTER creates a BRAND NEW "${_dir}/pid" AFTER this mv, from
