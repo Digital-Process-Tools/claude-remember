@@ -1079,7 +1079,8 @@ _SCAN_NAME="${TRANSCRIPT##*[/\\]}"
 _SCAN_NAME="${_SCAN_NAME%.jsonl}"
 if [ -z "${_SCAN_NAME#.}" ] || [ -z "${_SCAN_NAME#..}" ] \
     || [ "${_SCAN_NAME#-}" != "$_SCAN_NAME" ] \
-    || [[ "$_SCAN_NAME" == *[!A-Za-z0-9._-]* ]]; then
+    || [[ "$_SCAN_NAME" == *[!A-Za-z0-9._-]* ]] \
+    || [[ "$TRANSCRIPT" == *$'\n'* ]]; then
     _SCAN_NAME=""
 fi
 # #1034: an empty name used to disable the cache SILENTLY -- every tool call
@@ -1106,7 +1107,11 @@ if [ -n "$_SCAN_NAME" ]; then
     if [ -f "$SCAN_SIDECAR" ]; then
         _SCAN_RAW_OFFSET=""
         _SCAN_RAW_LINES=""
-        read -r _SCAN_RAW_OFFSET _SCAN_RAW_LINES < "$SCAN_SIDECAR" 2>/dev/null
+        _SCAN_RAW_PATH=""
+        {
+            read -r _SCAN_RAW_OFFSET _SCAN_RAW_LINES
+            IFS= read -r _SCAN_RAW_PATH
+        } < "$SCAN_SIDECAR" 2>/dev/null || true
         # Validated as a PAIR, not field-by-field (self-review finding): a
         # write interrupted between the two fields (OOM, disk full, a kill
         # mid-`printf`) can leave a syntactically VALID OFFSET -- a real
@@ -1118,7 +1123,8 @@ if [ -n "$_SCAN_NAME" ]; then
         # that is wrong and passes every check this function runs on it.
         # Any failure on either field now discards BOTH, forcing the same
         # full recount an absent sidecar already gets.
-        if [ -z "$_SCAN_RAW_OFFSET" ] || [[ "$_SCAN_RAW_OFFSET" == *[!0-9]* ]] \
+        if [ "$_SCAN_RAW_PATH" != "$TRANSCRIPT" ] \
+            || [ -z "$_SCAN_RAW_OFFSET" ] || [[ "$_SCAN_RAW_OFFSET" == *[!0-9]* ]] \
             || [ -z "$_SCAN_RAW_LINES" ] || [[ "$_SCAN_RAW_LINES" == *[!0-9]* ]]; then
             _SCAN_RAW_OFFSET=0
             _SCAN_RAW_LINES=0
@@ -1135,14 +1141,15 @@ _SCAN_NEW_OFFSET=$PT_SCAN_OFFSET
 CURRENT_LINES=$PT_SCAN_LINES
 CURRENT_LINES=$(( CURRENT_LINES + 0 ))
 
-# Plain redirect, not the mktemp+rename the #353 sidecar uses: a partial
-# write here is self-healing. The read above already treats anything that
-# is not two plain digit fields as "no sidecar at all" (OFFSET=0, LINES=0),
-# so a crash mid-write costs one extra full recount next call, never a
-# wrong DELTA -- unlike last-save.json's own sidecar, where a wrong value
-# could skip or duplicate a summary.
+# shortcut: same-path rewrites preserving the checkpoint newline need a full recount; upgrade when transcripts can be replaced.
+# Bind cached counts to the transcript path and publish the pair atomically.
 if [ -n "$SCAN_SIDECAR" ]; then
-    printf '%s %s\n' "$_SCAN_NEW_OFFSET" "$CURRENT_LINES" > "$SCAN_SIDECAR" 2>/dev/null
+    _SCAN_TEMP=$(mktemp "${SCAN_SIDECAR}.XXXXXX" 2>/dev/null) && {
+        if ! printf '%s %s\n%s\n' "$_SCAN_NEW_OFFSET" "$CURRENT_LINES" "$TRANSCRIPT" > "$_SCAN_TEMP" 2>/dev/null \
+            || ! mv -f "$_SCAN_TEMP" "$SCAN_SIDECAR" 2>/dev/null; then
+            rm -f "$_SCAN_TEMP" 2>/dev/null || true
+        fi
+    }
 fi
 fi
 # CURRENT_LINES is 0 here when the scan above was skipped (IN_COOLDOWN=true)

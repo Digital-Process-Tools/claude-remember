@@ -150,7 +150,7 @@ def test_a_warm_call_reads_only_the_appended_bytes(tmp_path):
 
     sidecar = _sidecar(remember)
     assert sidecar.exists(), "no transcript-scan sidecar was written"
-    offset, lines = sidecar.read_text(encoding="utf-8").split()
+    offset, lines = sidecar.read_text(encoding="utf-8").splitlines()[0].split()
     assert int(lines) == 15, (
         f"expected 15 lines counted (10 + 5 appended), sidecar says {lines}"
     )
@@ -211,7 +211,7 @@ def test_a_half_written_last_line_is_not_counted_until_complete(tmp_path):
     first = _run(env)
     assert first.returncode == 0, first.stderr[:400]
     sidecar = _sidecar(remember)
-    offset_before, lines_before = sidecar.read_text(encoding="utf-8").split()
+    offset_before, lines_before = sidecar.read_text(encoding="utf-8").splitlines()[0].split()
     assert lines_before == "10"
 
     partial = chr(123) + chr(34) + "type" + chr(34) + ":" + chr(34) + "x"
@@ -220,7 +220,7 @@ def test_a_half_written_last_line_is_not_counted_until_complete(tmp_path):
 
     second = _run(env)
     assert second.returncode == 0, second.stderr[:400]
-    offset_mid, lines_mid = sidecar.read_text(encoding="utf-8").split()
+    offset_mid, lines_mid = sidecar.read_text(encoding="utf-8").splitlines()[0].split()
     assert lines_mid == "10"
     assert offset_mid == offset_before
     assert not (remember / "tmp" / "save-session.pid").exists()
@@ -231,7 +231,7 @@ def test_a_half_written_last_line_is_not_counted_until_complete(tmp_path):
 
     third = _run(env)
     assert third.returncode == 0, third.stderr[:400]
-    _, lines_after = sidecar.read_text(encoding="utf-8").split()
+    _, lines_after = sidecar.read_text(encoding="utf-8").splitlines()[0].split()
     assert lines_after == "11"
     assert (remember / "tmp" / "save-session.pid").exists()
     _reap(remember)
@@ -244,14 +244,14 @@ def test_a_shrunk_transcript_falls_back_to_a_full_recount(tmp_path):
     first = _run(env)
     assert first.returncode == 0, first.stderr[:400]
     sidecar = _sidecar(remember)
-    offset_before, _ = sidecar.read_text(encoding="utf-8").split()
+    offset_before, _ = sidecar.read_text(encoding="utf-8").splitlines()[0].split()
     assert int(offset_before) == len(transcript.read_bytes())
 
     transcript.write_text(TRANSCRIPT_LINE * 3, encoding="utf-8")
 
     second = _run(env)
     assert second.returncode == 0, second.stderr[:400]
-    offset_after, lines_after = sidecar.read_text(encoding="utf-8").split()
+    offset_after, lines_after = sidecar.read_text(encoding="utf-8").splitlines()[0].split()
     assert lines_after == "3"
     assert int(offset_after) == len(transcript.read_bytes())
 
@@ -270,7 +270,7 @@ def test_a_rewritten_transcript_falls_back_rather_than_trusting_a_stale_offset(t
     second = _run(env)
     assert second.returncode == 0, second.stderr[:400]
     sidecar = _sidecar(remember)
-    offset_after, lines_after = sidecar.read_text(encoding="utf-8").split()
+    offset_after, lines_after = sidecar.read_text(encoding="utf-8").splitlines()[0].split()
     assert lines_after == "1"
     assert int(offset_after) == len(transcript.read_bytes())
 
@@ -287,14 +287,14 @@ def test_a_partial_sidecar_write_is_rejected_as_a_pair_not_per_field(tmp_path):
     first = _run(env)
     assert first.returncode == 0, first.stderr[:400]
     sidecar = _sidecar(remember)
-    real_offset, real_lines = sidecar.read_text(encoding="utf-8").split()
+    real_offset, real_lines = sidecar.read_text(encoding="utf-8").splitlines()[0].split()
     assert real_lines == "20"
 
     sidecar.write_text(real_offset + " ", encoding="utf-8")
 
     second = _run(env)
     assert second.returncode == 0, second.stderr[:400]
-    offset_after, lines_after = sidecar.read_text(encoding="utf-8").split()
+    offset_after, lines_after = sidecar.read_text(encoding="utf-8").splitlines()[0].split()
     assert lines_after == "20", (
         f"a partial sidecar write (valid OFFSET, missing LINES) undercounted "
         f"to {lines_after} lines instead of recounting the real 20"

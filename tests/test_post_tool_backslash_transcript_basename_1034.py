@@ -132,7 +132,7 @@ def _assert_sidecar_written(remember, transcript, result):
         + NL + "logs: " + _logs(remember)[-800:]
         + NL + "stderr: " + result.stderr.decode("utf-8", "replace")[-800:]
     )
-    offset, lines = sidecar.read_text(encoding="utf-8").split()
+    offset, lines = sidecar.read_text(encoding="utf-8").splitlines()[0].split()
     assert int(lines) == 10
     assert int(offset) == len(transcript.read_bytes())
 
