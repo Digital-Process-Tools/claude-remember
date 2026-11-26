@@ -112,6 +112,63 @@ def test_real_wscript_plain_path_detaches_and_saves(tmp_path):
     )
 
 
+def _nul_diagnostics(directory: Path) -> str:
+    """Failure message for a stray-`nul` assertion: the directory listing and,
+    if a real file named nul is listed, its size and content (a bare PID means
+    pidwrap wrote its pidfile there; log text means its outfile redirect did)."""
+    names = os.listdir(str(directory))
+    msg = f"a stray file named nul was created (#1132); listing={names!r}"
+    if "nul" in names:
+        long_prefix = chr(92) * 2 + "?" + chr(92)
+        try:
+            with open(long_prefix + str(directory / "nul"), "rb") as f:
+                data = f.read()
+            msg += f" size={len(data)} content={data[:500]!r}"
+        except OSError as exc:
+            msg += f" (could not read it: {exc!r})"
+    return msg
+
+
+def test_real_consolidation_launch_creates_no_nul_file_and_still_runs(tmp_path):
+    """#1132: scripts/consolidation-launch.sh passes /dev/null for both
+    OUTFILE and PIDFILE. MSYS used to rewrite that to `nul`, creating a real
+    file of that name in the cwd. Positive control: the command still ran
+    (marker present), so a missing `nul` is not just a launcher that did
+    nothing."""
+    marker = tmp_path / "marker.txt"
+    save = _save_script(tmp_path, marker)
+    launch = (REPO_ROOT / "scripts" / "consolidation-launch.sh").as_posix()
+    r = _run(f'bash "{launch}" "{save.as_posix()}"; echo "RC=$?"',
+             env={"TMPDIR": str(tmp_path)}, cwd=tmp_path)
+    assert "RC=0" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    assert _poll_for_marker(marker), "the launched command never ran"
+    # NOT (tmp_path / "nul").exists(): on Windows that path resolves to the
+    # NUL *device* and is True whether or not a file exists (reserved device
+    # names win path resolution), so it fails on a clean directory. A
+    # directory listing only shows real files.
+    assert "nul" not in os.listdir(str(tmp_path)), _nul_diagnostics(tmp_path)
+
+
+def test_real_consolidation_launch_removes_existing_nul_file(tmp_path):
+    """#1132: a stray `nul` regular file already on disk (left by an older
+    version, or by `2>nul` through Git Bash) is removed by the launcher.
+    The file is created through the extended-length path prefix, the only
+    spelling Win32 reliably treats as a file rather than the null device.
+    Positive control: the launched command still ran (marker present)."""
+    stray = tmp_path / "nul"
+    long_prefix = chr(92) * 2 + "?" + chr(92)
+    with open(long_prefix + str(stray), "w", encoding="utf-8") as f:
+        f.write("12345\n")
+    marker = tmp_path / "marker.txt"
+    save = _save_script(tmp_path, marker)
+    launch = (REPO_ROOT / "scripts" / "consolidation-launch.sh").as_posix()
+    r = _run(f'bash "{launch}" "{save.as_posix()}"; echo "RC=$?"',
+             env={"TMPDIR": str(tmp_path)}, cwd=tmp_path)
+    assert "RC=0" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    assert _poll_for_marker(marker), "the launched command never ran"
+    assert "nul" not in os.listdir(str(tmp_path)), "stray nul file was not removed (#1132)"
+
+
 def test_real_wscript_path_with_space_detaches_and_saves(tmp_path):
     """Case (b): outfile, pidfile and the save script itself all live under
     a directory containing a space -- the shape most likely to expose a
