@@ -138,13 +138,12 @@ if REMEMBER_PROJECT_COMMON_DIR=$(_remember_git_common_dir "$PROJECT_DIR"); then
 else
     _project_git_rc=$?
     REMEMBER_PROJECT_COMMON_DIR=""
-    case $_project_git_rc in
-        3) REMEMBER_PROJECT_GIT_STATE=none ;;
-        *)
-            REMEMBER_PROJECT_GIT_STATE=unknown
-            log "git-backup" "could not determine which git repository PROJECT_DIR ($PROJECT_DIR) belongs to; the backup hook will decline to commit until a save can tell"
-            ;;
-    esac
+    if [ "$_project_git_rc" = 3 ]; then
+        REMEMBER_PROJECT_GIT_STATE=none
+    else
+        REMEMBER_PROJECT_GIT_STATE=unknown
+        log "git-backup" "could not determine which git repository PROJECT_DIR ($PROJECT_DIR) belongs to; the backup hook will decline to commit until a save can tell"
+    fi
 fi
 export REMEMBER_PROJECT_COMMON_DIR REMEMBER_PROJECT_GIT_STATE
 

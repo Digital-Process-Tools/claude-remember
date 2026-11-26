@@ -22,6 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(__file__))
 import test_save_session_gates as gates  # noqa: E402
 from test_git_backup_hook import (  # noqa: E402
@@ -226,6 +228,79 @@ class TestRealResolutionPathWorktreeVanishesMidRun:
         assert not decoy.exists(), "harness check: the shim must have fired"
         assert worktree.exists()
         assert _commit_log(main) == before
+
+
+class TestCommonDirHelperPortability:
+    """The helper must not depend on the language of the VCS or on it being new (#1134)."""
+
+    @staticmethod
+    def _ask_from(cwd, path, extra_env=None, drop=()):
+        env = {**os.environ, "_LIB_MEMORY_DIR_LOADED": "1", **(extra_env or {})}
+        for name in drop:
+            env.pop(name, None)
+        script = f'source "{LIB}"; _remember_git_common_dir "$1"; echo "rc=$?"'
+        r = subprocess.run(
+            ["bash", "-c", script, "x", str(path)],
+            env=env, cwd=str(cwd), capture_output=True, text=True,
+        )
+        out = r.stdout.strip().splitlines()
+        return out[:-1], out[-1]
+
+    def test_a_non_english_git_still_reports_not_a_repository(self, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        french = {"LANG": "fr_FR.UTF-8", "LANGUAGE": "fr"}
+        env = {k: v for k, v in os.environ.items() if k != "LC_ALL"}
+        argv = [shutil.which("git"), "-C", str(plain)] + "rev-parse --git-common-dir".split()
+        probe = subprocess.run(argv, env={**env, **french}, capture_output=True, text=True)
+        if "not a git repository" in probe.stderr:
+            pytest.skip("this git has no translated messages for fr_FR here")
+        # Positive control: the harness really does get a non-English message.
+        assert probe.returncode != 0 and probe.stderr.strip()
+        assert self._ask_from(tmp_path, plain, french, drop=("LC_ALL",)) == ([], "rc=3")
+
+    def test_english_git_still_reports_not_a_repository(self, tmp_path):
+        """Control for the test above: the same call on a plain environment."""
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert self._ask_from(tmp_path, plain, {"LC_ALL": "C"}) == ([], "rc=3")
+
+    @staticmethod
+    def _old_vcs(tmp_path):
+        """A git older than 2.31: echoes --path-format=... back and exits 0."""
+        shimdir = tmp_path / "oldgit"
+        shimdir.mkdir()
+        real = shutil.which("git")
+        shim = shimdir / "git"
+        shim.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "keep = []\n"
+            "for a in sys.argv[1:]:\n"
+            "    if a.startswith('--path-format='):\n"
+            "        print(a, flush=True)\n"
+            "    else:\n"
+            "        keep.append(a)\n"
+            f"os.execv({real!r}, [{real!r}] + keep)\n"
+        )
+        shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+        return shimdir
+
+    def test_old_git_relative_answer_is_resolved_against_the_asked_directory(self, tmp_path):
+        main, worktree = _make_worktree_project(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        path = f"{self._old_vcs(tmp_path)}{os.pathsep}{os.environ['PATH']}"
+        want = _common_dir(main)
+        # Positive control: the shim really does behave like an old git.
+        argv = ["git", "-C", str(main)]
+        argv += ["rev-parse", "--path-format=absolute", "--git-common-dir"]
+        echoed = subprocess.run(
+            argv, env={**os.environ, "PATH": path}, capture_output=True, text=True,
+        )
+        assert echoed.stdout.splitlines()[0] == "--path-format=absolute"
+        assert self._ask_from(elsewhere, main, {"PATH": path}) == ([want], "rc=0")
+        assert self._ask_from(elsewhere, worktree, {"PATH": path}) == ([want], "rc=0")
 
 
 class TestHookUsesCapturedProjectState:
