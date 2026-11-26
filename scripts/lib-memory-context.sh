@@ -177,36 +177,58 @@ _remember_memory_paths() {
 #   anything else, or only unknown   -> all six, with a warning note: a typo
 #                                       must never silently blank the memory
 # The value comes through config_into like every other key: the shared
-# flattener (cfg_flatten.jq / .py) carries an array of plain names as one
-# space-joined value, "[]" when empty and "#invalid" for any other array. No
-# jq or python is run here, so SessionStart cache hits, saves and
-# consolidation pay nothing for the key. Never fails the caller, never logs:
-# only the SessionStart hook reports the note (_remember_session_start_files_warn).
+# flattener (cfg_flatten.jq / .py) carries an array of single plain names as one
+# bracketed row, "[a b]" ("[]" when empty), and any other array as "#invalid".
+# The per-key fallback read (a config the flattener declined) returns the JSON
+# text instead, which is held to the same rule: a JSON array of single names
+# only. A plain string must be exactly one name. No jq or python is run here, so
+# SessionStart cache hits, saves and consolidation pay nothing for the key.
+# Never fails the caller, never logs: only the SessionStart hook reports the
+# note (_remember_session_start_files_warn).
 _remember_session_start_files_resolve() {
+    local LC_ALL=C
     local _all="identity core today now recent archive"
-    local _val="" _txt="" _w _n _sel=" " _bad="" _any=0 _noglob=0 _q='"'
+    local _val="" _inner="" _w _n _sel=" " _bad="" _any=0 _noglob=0 _q='"' _words="" _isnote=0
+    local _re='^[[:space:]]*("[A-Za-z0-9_-]+"[[:space:]]*(,[[:space:]]*"[A-Za-z0-9_-]+"[[:space:]]*)*)?$'
     _REMEMBER_SESSION_FILES_SEL="$_all"
     _REMEMBER_SESSION_FILES_NOTE=""
     config_into _val ".session_start_files" ""
     if [ -z "$_val" ]; then
-        # Absent, or present but not something the flattener carries (an
-        # object, say). The config text tells the two apart.
-        if [ -f "${REMEMBER_CONFIG:-}" ]; then
-            IFS= read -r -d '' _txt < "$REMEMBER_CONFIG" || true
-            if [[ "$_txt" == *session_start_files* ]]; then
+        # Absent or null: all six, silently. An object under the key is not
+        # carried as a row, but its children are (session_start_files_<k>).
+        for _n in ${_REMEMBER_CFG_NAMES[@]+"${_REMEMBER_CFG_NAMES[@]}"}; do
+            if [[ "$_n" == _RCFG_session_start_files_* ]]; then
                 _REMEMBER_SESSION_FILES_NOTE="session_start_files is not a list of names - injecting all memory files"
+                break
             fi
-        fi
+        done
+        _isnote=1
     elif [ "$_val" = "#invalid" ]; then
         _REMEMBER_SESSION_FILES_NOTE="session_start_files has an entry that is not a single plain name - injecting all memory files"
-    elif [ "$_val" = "[]" ]; then
-        _REMEMBER_SESSION_FILES_SEL=""
+        _isnote=1
+    elif [[ "$_val" == "["*"]" ]]; then
+        _inner="${_val#[}"
+        _inner="${_inner%]}"
+        if [[ "$_inner" == *"$_q"* ]]; then
+            # JSON text (per-key fallback): single plain names only.
+            if [[ "$_inner" =~ $_re ]]; then
+                _inner="${_inner//$_q/ }"
+                _words="${_inner//,/ }"
+            else
+                _REMEMBER_SESSION_FILES_NOTE="session_start_files has an entry that is not a single plain name - injecting all memory files"
+                _isnote=1
+            fi
+        else
+            _words="$_inner"
+        fi
+    elif [[ "$_val" == *[[:space:]]* ]]; then
+        _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of names or one name - injecting all memory files"
+        _isnote=1
     else
-        # Also accepts the JSON text the per-key fallback read returns.
-        _val="${_val//\[/ }"
-        _val="${_val//\]/ }"
-        _val="${_val//$_q/ }"
-        _val="${_val//,/ }"
+        _words="$_val"
+    fi
+    if [ "$_isnote" = 0 ]; then
+        _val="$_words"
         if [[ $- == *f* ]]; then _noglob=1; else set -f; fi
         for _w in $_val; do
             if [[ " $_all " == *" $_w "* ]]; then
@@ -1011,6 +1033,18 @@ _remember_deselected_block_into() {
     printf -v "$1" '%s' "$_db_out"
 }
 
+# _remember_render_deselected_only (#1136)
+# The whole MEMORY section when nothing selected is injectable: just the
+# pointer at the files session_start_files left out, or nothing at all.
+_remember_render_deselected_only() {
+    local _rdo_block=""
+    _remember_deselected_block_into _rdo_block
+    if [ -n "$_rdo_block" ]; then
+        echo "=== MEMORY ==="
+        printf '%s' "$_rdo_block"
+    fi
+}
+
 _remember_render_memory_section() {
     local MFILE HAS_MEMORY="" ROTATED_SLICES _remember_rotated_glob_dir
     local _remember_rotated_arr=()
@@ -1020,12 +1054,7 @@ _remember_render_memory_section() {
     # anything below iterates the (empty) array: "${arr[@]}" on an empty array
     # is an unbound-variable error under set -u on bash < 4.4.
     if [ "${#MEMORY_FILES[@]}" -eq 0 ]; then
-        local _remember_dsel_only=""
-        _remember_deselected_block_into _remember_dsel_only
-        if [ -n "$_remember_dsel_only" ]; then
-            echo "=== MEMORY ==="
-            printf '%s' "$_remember_dsel_only"
-        fi
+        _remember_render_deselected_only
         return 0
     fi
     for MFILE in "${MEMORY_FILES[@]}"; do
@@ -1064,7 +1093,12 @@ _remember_render_memory_section() {
     fi
     [ -n "$ROTATED_SLICES" ] && HAS_MEMORY="true"
 
-    [ -n "$HAS_MEMORY" ] || return 0
+    # Nothing selected exists yet (["now"] before the first save): still name
+    # the files that were left out.
+    if [ -z "$HAS_MEMORY" ]; then
+        _remember_render_deselected_only
+        return 0
+    fi
 
     echo "=== MEMORY ==="
     local MEMORY_INJECT_MAX_BYTES=""
@@ -1324,6 +1358,11 @@ _remember_start_cache_manifest_lines() {
     for MFILE in ${MEMORY_FILES[@]+"${MEMORY_FILES[@]}"}; do
         printf 'SRC=%s\n' "$MFILE"
     done
+    # #1136: the files left out are NAMED, with their sizes, in the rendered
+    # section, so a change to one of them must invalidate the cache too.
+    while IFS= read -r MFILE; do
+        [ -z "$MFILE" ] || printf 'SRC=%s\n' "$MFILE"
+    done <<< "${_REMEMBER_DESELECTED:-}"
     # REMEMBER_DIR itself: catches a rotated slice appearing or disappearing
     # even if whatever created it never republished the cache (belt and
     # braces -- every writer of a new memory file in THIS codebase does

@@ -10,7 +10,8 @@ real bash: moving the program to its own file removes that risk rather than
 asking the scanner to reason about where a shell string ends).
 
 Same contract jq's own one-liner (`_REMEMBER_CFG_FLATTEN_JQ`, log.sh) keeps:
-same refusals, same "haiku" top-level key skipped, same textual form for
+same refusals, same "haiku" top-level key and documentation-only "_comments"
+block skipped, an array of plain names carried as one bracketed row (#1136), same textual form for
 non-string values -- "true"/"false", never Python's "True"/"False" (the #159
 near miss this whole dual-path design exists to avoid repeating).
 """
@@ -25,23 +26,20 @@ def walk(node, prefix, out):
         for k, v in node.items():
             walk(v, prefix + [k], out)
     elif isinstance(node, list):
-        # #1136: an array is carried as one value (see encode_list); keys
-        # outside the slot alphabet and the documentation-only _comments
-        # block are skipped rather than allowed to trip the refusals below.
-        if prefix and prefix[0] != "_comments" and all(
-            re.match(r"^[A-Za-z0-9_]+$", part) for part in prefix
-        ):
-            out.append((prefix, node))
+        # #1136: an array is one row (see encode_list); main() decides which
+        # arrays are carried. Paths INTO an array are never emitted.
+        out.append((prefix, node))
     else:
         out.append((prefix, node))
 
 
 def encode_list(items) -> str:
-    """Same encoding as cfg_flatten.jq: space-joined plain names, "[]" when
-    empty, "#invalid" for anything else (#1136)."""
-    if any(not isinstance(i, str) or re.search(r"\s", i) for i in items):
+    """Same encoding as cfg_flatten.jq: "[a b]" for an array of single plain
+    names ("[]" when empty), "#invalid" for anything else (#1136). Whitespace
+    is exactly space, tab, newline and carriage return -- the jq side's set."""
+    if any(not isinstance(i, str) or re.search(r"[ \t\n\r]", i) for i in items):
         return "#invalid"
-    return " ".join(items) if items else "[]"
+    return "[" + " ".join(items) + "]"
 
 
 def main() -> None:
@@ -53,28 +51,48 @@ def main() -> None:
 
     rows = []
     walk(doc, [], rows)
-    rows = [(p, v) for p, v in rows if p and p[0] != "haiku" and v is not None]
+    rows = [
+        (p, v)
+        for p, v in rows
+        if p and p[0] not in ("haiku", "_comments")
+    ]
+    arrays = [(p, v) for p, v in rows if isinstance(v, list)]
+    rows = [(p, v) for p, v in rows if not isinstance(v, list)]
 
     ok = re.compile(r"^[A-Za-z0-9_]+$")
+    # Same order as cfg_flatten.jq: every key, then collisions, then values.
     for p, v in rows:
         if not all(ok.match(part) for part in p):
             print("#refuse a config key is outside [A-Za-z0-9_]")
-            sys.exit(0)
-        if isinstance(v, str) and ("\t" in v or "\n" in v):
-            print("#refuse a config value contains a tab or a newline")
             sys.exit(0)
     slots = ["_".join(p) for p, _ in rows]
     if len(set(slots)) != len(slots):
         print("#refuse two config keys flatten to the same name")
         sys.exit(0)
+    for p, v in rows:
+        if isinstance(v, str) and ("\t" in v or "\n" in v):
+            print("#refuse a config value contains a tab or a newline")
+            sys.exit(0)
+
+    # #1136: an array never causes a refusal and never displaces a scalar --
+    # one whose key is outside the alphabet, or whose flattened name another
+    # key already holds, is simply not carried (same rule as cfg_flatten.jq).
+    taken = set(slots)
+    arrays = [
+        (p, v) for p, v in arrays if all(ok.match(part) for part in p) and "_".join(p) not in taken
+    ]
+    names = ["_".join(p) for p, _ in arrays]
+    arrays = [(p, v) for (p, v), n in zip(arrays, names) if names.count(n) == 1]
 
     out = []
+    # A null value takes part in every refusal above (as in cfg_flatten.jq,
+    # where its path is still a path) but is never emitted.
     for p, v in rows:
-        if isinstance(v, list):
-            text = encode_list(v)
-        else:
-            text = v if isinstance(v, str) else json.dumps(v)
-        out.append(".".join(p) + "\t" + text)
+        if v is None:
+            continue
+        out.append(".".join(p) + "\t" + (v if isinstance(v, str) else json.dumps(v)))
+    for p, v in arrays:
+        out.append(".".join(p) + "\t" + encode_list(v))
     sys.stdout.write("\n".join(out))
 
 

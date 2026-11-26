@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import shutil
 import subprocess
 import sys
 import time
@@ -283,14 +285,178 @@ def test_budget_loop_skips_deselected_files(tmp_path):
     assert just_now < everything
 
 
-def test_flatteners_agree_on_arrays():
-    cfg = REPO_ROOT / "config.example.json"
-    jq = subprocess.run(["jq", "-r", "-f", str(REPO_ROOT / "scripts" / "cfg_flatten.jq"), str(cfg)],
-                        capture_output=True, text=True, check=False)
-    py = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "cfg_flatten.py"), str(cfg)],
-                        capture_output=True, text=True, check=False)
-    if jq.returncode != 0:
+def test_example_config_flattens_the_same_in_both_flatteners():
+    if not _have_jq():
         pytest.skip("no jq to compare against")
+    jq, py = _flatten_both(REPO_ROOT / "config.example.json")
     assert jq.stdout.rstrip("\n") == py.stdout.rstrip("\n")
-    assert "session_start_files\tidentity core today now recent archive" in py.stdout
+    assert "session_start_files\t[identity core today now recent archive]" in py.stdout
     assert "_comments" not in py.stdout
+
+
+def _note(env) -> str:
+    return _call("note", env).stdout.strip()[len("note="):]
+
+
+@pytest.mark.parametrize("value", [None, "now"])
+def test_null_and_comment_mentions_do_not_warn(tmp_path, value):
+    cfg = {"session_start_files": value, "_comments": {"session_start_files": ["see docs"]}}
+    _, _, env = _store(tmp_path, cfg)
+    assert _note(env) == ""
+    if value is None:
+        assert _present(_call("render", env).stdout) == ALL_HEADERS
+
+
+def test_a_comment_mention_alone_does_not_warn(tmp_path):
+    _, _, env = _store(tmp_path, {"_comments": {"session_start_files": ["see docs"]}})
+    assert _note(env) == ""
+    _, _, env2 = _store(tmp_path / "b", {"session_start_files": {"a": "now"}})
+    assert _note(env2) != "", "positive control: a real object value does warn"
+
+
+@pytest.mark.parametrize("value", [[["now"]], ["now recent"], ["now,core"], "now recent"])
+def test_fallback_path_is_as_strict_as_the_table_path(tmp_path, value):
+    """A key outside [A-Za-z0-9_] makes the flattener decline, so config_into
+    answers from the per-key read (raw JSON text)."""
+    _, _, env = _store(tmp_path, {"bad-key": 1, "session_start_files": value})
+    assert _present(_call("render", env).stdout) == ALL_HEADERS
+    assert _note(env) != ""
+
+
+def test_fallback_path_accepts_a_good_list(tmp_path):
+    _, _, env = _store(tmp_path, {"bad-key": 1, "session_start_files": ["now", "core"]})
+    assert _present(_call("render", env).stdout) == ["--- core-memories.md ---", "--- now.md ---"]
+    assert _note(env) == ""
+
+
+def test_pointer_is_printed_even_when_no_selected_file_exists(tmp_path):
+    remember, _, env = _store(tmp_path, {"session_start_files": ["now"]})
+    (remember / "now.md").unlink()
+    out = _call("render", env).stdout
+    assert POINTER in out
+    assert "recent.md" in out
+    # positive control: the same store with now.md present still injects it
+    _, _, env2 = _store(tmp_path / "b", {"session_start_files": ["now"]})
+    assert "--- now.md ---" in _call("render", env2).stdout
+
+
+def test_manifest_names_the_deselected_files(tmp_path):
+    remember, _, env = _store(tmp_path, {"session_start_files": ["now"]})
+    assert _call("publish", env).returncode == 0
+    manifest = (remember / "tmp" / "start-context.manifest").read_text()
+    assert "SRC=" + str(remember / "recent.md") in manifest
+    cache = remember / "tmp" / "start-context.cache"
+    t = time.time() + 5
+    os.utime(cache, (t, t))
+    assert _call("load", env).returncode == 0, "positive control: untouched is a hit"
+    os.utime(remember / "recent.md", (t + 10, t + 10))
+    assert _call("load", env).returncode == 1, "a listed size may now be stale: miss"
+
+def test_a_flatten_cache_from_before_arrays_is_not_served(tmp_path):
+    """A cache written by a build that did not emit array rows has the same
+    file name and the same first two header lines. It must not be served."""
+    remember, _, env = _store(tmp_path, {"session_start_files": ["now"]})
+    tmpdir = tmp_path / "tmpdir"
+    tmpdir.mkdir()
+    env["TMPDIR"] = str(tmpdir)
+    env["REMEMBER_CONFIG_CACHE"] = "1"
+    assert _call("files", env).stdout.strip() == "count=1"
+    caches = list(tmpdir.glob("remember-config-cache-*"))
+    assert len(caches) == 1, "positive control: the flatten cache was published"
+    text = caches[0].read_text()
+    assert "#FLATTEN=" in text
+    old_format = "".join(
+        line for line in text.splitlines(keepends=True)
+        if not line.startswith(("#FLATTEN=", "_RCFG_session_start_files"))
+    )
+    caches[0].write_text(old_format)
+    t = time.time() + 30
+    os.utime(caches[0], (t, t))
+    assert _call("files", env).stdout.strip() == "count=1"
+    assert _note(env) == ""
+
+def _have_jq() -> bool:
+    return shutil.which("jq") is not None
+
+
+def _flatten_both(cfg_path: Path):
+    jq = subprocess.run(["jq", "-r", "-f", str(REPO_ROOT / "scripts" / "cfg_flatten.jq"), str(cfg_path)],
+                        capture_output=True, text=True, check=False)
+    py = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "cfg_flatten.py"), str(cfg_path)],
+                        capture_output=True, text=True, check=False)
+    return jq, py
+
+EDGE_DOCS = [
+    {"_comments": {"dotted.key": "x"}},
+    {"_comments": "s"},
+    {"_comments": {"k": ["a b"]}, "a": 1},
+    {"session_start_files": ["now", "x y"]},
+    {"session_start_files": []},
+    {"session_start_files": [["now"]]},
+    {"session_start_files": [1]},
+    {"x": {"y": ["a"]}, "x_y": 1},
+    {"x_y": ["a"], "x": {"y": 1}},
+    {"a_b": ["x"], "a": {"b": ["y"]}},
+    {"bad-key": ["x"], "ok": ["y"]},
+    {"o": {"x": "now"}, "n": None, "t": True},
+]
+
+
+@pytest.mark.parametrize("doc", EDGE_DOCS)
+def test_flatteners_agree_on_edge_cases(tmp_path, doc):
+    if not _have_jq():
+        pytest.skip("no jq to compare against")
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps(doc), encoding="utf-8")
+    jq, py = _flatten_both(cfg)
+    assert jq.returncode == 0 and py.returncode == 0, (doc, jq.stderr, py.stderr)
+    assert jq.stdout.rstrip("\n") == py.stdout.rstrip("\n"), doc
+
+
+def test_an_array_never_makes_a_config_newly_refused(tmp_path):
+    """x.y = ["a"] beside x_y = 1 loaded before arrays were carried; it must
+    still load, with the scalar row intact."""
+    if not _have_jq():
+        pytest.skip("no jq")
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"x": {"y": ["a"]}, "x_y": 1}), encoding="utf-8")
+    for out in _flatten_both(cfg):
+        assert "#refuse" not in out.stdout
+        assert "x_y\t1" in out.stdout
+
+ODD_SPACES = [chr(0x0C), chr(0x0B), chr(0xA0), chr(0x2003), chr(0x85)]
+
+
+@pytest.mark.parametrize("space", ODD_SPACES)
+def test_flatteners_agree_on_unicode_and_odd_whitespace(tmp_path, space):
+    if not _have_jq():
+        pytest.skip("no jq to compare against")
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"session_start_files": ["now", "x" + space + "y"]}), encoding="utf-8")
+    jq, py = _flatten_both(cfg)
+    assert jq.stdout.rstrip("\n") == py.stdout.rstrip("\n")
+
+
+def test_flatteners_agree_on_generated_configs(tmp_path):
+    if not _have_jq():
+        pytest.skip("no jq to compare against")
+    rng = random.Random(1136)
+    keys = ["a", "b", "a_b", "x", "x_y", "y", "_comments", "haiku", "bad-key", "session_start_files"]
+    atoms = ["now", "core", "x y", "x" + chr(0x0C) + "y", "x" + chr(0xA0) + "y", "t" + chr(9) + "t",
+             "", True, False, None, 3, 2.5]
+
+    def value(depth):
+        kind = rng.choice(["atom", "atom", "list", "obj"] if depth < 3 else ["atom", "list"])
+        if kind == "atom":
+            return rng.choice(atoms)
+        if kind == "list":
+            return [rng.choice([*atoms, ["now"], {"k": "v"}]) for _ in range(rng.randint(0, 3))]
+        return {rng.choice(keys): value(depth + 1) for _ in range(rng.randint(0, 3))}
+
+    for _ in range(80):
+        doc = {rng.choice(keys): value(0) for _ in range(rng.randint(1, 4))}
+        cfg = tmp_path / "g.json"
+        cfg.write_text(json.dumps(doc), encoding="utf-8")
+        jq, py = _flatten_both(cfg)
+        assert jq.returncode == py.returncode, doc
+        assert jq.stdout.rstrip("\n") == py.stdout.rstrip("\n"), doc

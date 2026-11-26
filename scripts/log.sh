@@ -163,6 +163,11 @@ _REMEMBER_CFG_LOADED_FROM=""
 _REMEMBER_CFG_NAMES=()
 _REMEMBER_CFG_VALUES=()
 
+# Version of the row format scripts/cfg_flatten.jq / .py emit, recorded in the
+# flatten cache header (#1136: arrays of names became rows). Bump it whenever
+# the flatteners start emitting something an older build never did.
+_REMEMBER_CFG_FLATTEN_VERSION="2"
+
 _remember_cfg_table_set() {
     _REMEMBER_CFG_NAMES+=("$1")
     _REMEMBER_CFG_VALUES+=("$2")
@@ -194,7 +199,8 @@ _config_is_private_path() {
     [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]
 }
 
-# Flatten every scalar to `dotted.key<TAB>value`, or decline to.
+# Flatten every scalar -- and every array of plain names, as one space-joined
+# value wrapped in brackets (#1136) -- to `dotted.key<TAB>value`, or decline to.
 #
 # It REFUSES rather than guesses, in three cases, because each one is a way for
 # a flattened table to answer a question wrongly and silently:
@@ -215,8 +221,11 @@ _config_is_private_path() {
 # emitted line can begin with `#`: keys are [A-Za-z0-9_.] by the time they are
 # printed.
 #
-# Paths through arrays are skipped, not refused: config() only accepts dotted
-# keys, so it could never name one.
+# Paths INTO arrays are skipped, not refused: config() only accepts dotted
+# keys, so it could never name one. An array itself is carried only when it is
+# an array of single plain names (one bracketed row, "[a b]", "[]" when empty;
+# "#invalid" for any other array), and it never causes a refusal: one whose key
+# is outside the alphabet or collides with another key is simply not carried.
 #
 # NOT `paths(scalars)`. jq's `paths(f)` keeps a path when f's OUTPUT is truthy,
 # so `paths(scalars)` silently drops every `false` in the file — the #159 bug
@@ -553,6 +562,14 @@ _remember_cfg_flatten_cache_load() {
                 _bad=1
                 break
             fi
+        elif [ "$_stage" = "2" ]; then
+            # #1136: the third header line names the FLATTENER version the
+            # rows were produced by. A cache an older build wrote (no such
+            # line, or another number) lacks rows the current flattener
+            # emits -- an array of names, say -- and must never be served: the
+            # file name and the two lines above are unchanged by that.
+            _stage=3
+            [ "$_line" = "#FLATTEN=${_REMEMBER_CFG_FLATTEN_VERSION}" ] || { _bad=1; break; }
         elif _remember_cfg_flatten_cache_valid_line "$_line"; then
             _lines[${#_lines[@]}]="$_line"
         else
@@ -564,7 +581,7 @@ _remember_cfg_flatten_cache_load() {
     # header lines were seen (including "no identity line" -- see above):
     # distrust the WHOLE file, and remove it, so the next start does not
     # re-read the same poison and re-pay this same rejection forever.
-    if [ -n "$_bad" ] || [ "$_stage" != "2" ]; then
+    if [ -n "$_bad" ] || [ "$_stage" != "3" ]; then
         rm -f "$_f" 2>/dev/null
         return 1
     fi
@@ -637,6 +654,7 @@ _remember_cfg_flatten_cache_publish() {
         _remember_cfg_flatten_q_encode _encoded_dir "${REMEMBER_DIR:-}"
         printf '#REMEMBER_DIR=%s\n' "$_encoded_dir"
         printf '#RCFG_EXISTS=%s\n' "$_exists_now"
+        printf '#FLATTEN=%s\n' "$_REMEMBER_CFG_FLATTEN_VERSION"
         local _encoded_v
         while IFS=$'\t' read -r _k _v; do
             [ -n "$_k" ] || continue
