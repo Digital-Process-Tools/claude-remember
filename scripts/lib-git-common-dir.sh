@@ -66,8 +66,9 @@ _remember_git_common_dir() {
         fi
     done
     [ -n "$_RGC_LINE" ] || return 1
-    if [ "${_RGC_LINE#/}" = "$_RGC_LINE" ] && [ "${_RGC_LINE#[A-Za-z]:[/\\]}" = "$_RGC_LINE" ]; then
-        _RGC_LINE="$_d/$_RGC_LINE"
+    _out="$_RGC_LINE"
+    if [ "${_out#/}" = "$_out" ] && [ "${_out#[A-Za-z]:[/\\]}" = "$_out" ]; then
+        _out="$_d/$_out"
     fi
-    ( cd "$_RGC_LINE" 2>/dev/null && pwd -P ) || printf '%s' "$_RGC_LINE"
+    ( cd "$_out" 2>/dev/null && pwd -P ) || printf '%s' "$_out"
 }
