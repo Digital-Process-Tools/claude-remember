@@ -133,10 +133,15 @@ log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PY
 #   repo     REMEMBER_PROJECT_COMMON_DIR is the project's git common dir
 #   none     git says PROJECT_DIR is not inside a repository (a real answer)
 #   unknown  the lookup itself failed -- the hook declines rather than guessing
-if REMEMBER_PROJECT_COMMON_DIR=$(_remember_git_common_dir "$PROJECT_DIR"); then
+_project_git_rc=1
+if declare -F _remember_git_common_dir >/dev/null; then
+    if REMEMBER_PROJECT_COMMON_DIR=$(_remember_git_common_dir "$PROJECT_DIR"); then _project_git_rc=0; else _project_git_rc=$?; fi
+else
+    REMEMBER_PROJECT_COMMON_DIR=""
+fi
+if [ "$_project_git_rc" = 0 ]; then
     REMEMBER_PROJECT_GIT_STATE=repo
 else
-    _project_git_rc=$?
     REMEMBER_PROJECT_COMMON_DIR=""
     if [ "$_project_git_rc" = 3 ]; then
         REMEMBER_PROJECT_GIT_STATE=none

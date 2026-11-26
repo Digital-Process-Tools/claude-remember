@@ -99,7 +99,7 @@ def _make_env(tmp_path: Path, thresholds: dict | None = None):
     (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)
     for script in ("run-consolidation.sh", "resolve-paths.sh", "detect-tools.sh",
                    "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh",
-                   "lib-lock.sh", "lib-staging-lock.sh", "lib-slug.sh",
+                   "lib-lock.sh", "lib-staging-lock.sh", "lib-slug.sh", "lib-git-common-dir.sh",
                    "lib-clock.sh"):
         (plugin / "scripts" / script).write_text((REPO_ROOT / "scripts" / script).read_text())
     config = {"cooldowns": {}, "thresholds": dict(thresholds or {})}

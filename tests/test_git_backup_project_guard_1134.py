@@ -37,6 +37,17 @@ from test_git_backup_hook import (  # noqa: E402
     wait_for_lock_release,
 )
 
+# Same stance as test_git_backup_hook.py / test_save_session_gates.py (#79): these drive
+# the bash hook and save-session through subprocess. A bare "bash" on Windows runners is
+# the WSL launcher (UTF-16 install banner on stdout), the PATH shims that fake a removed
+# worktree and an old git are not picked up by Git Bash there, and the hook is skipped
+# on Windows already. Linux and macOS carry the coverage; Windows drive-letter handling
+# of the helper stays pinned by test_git_reconcile_drive_letter_934.py.
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="bash hook/save-session subprocesses and PATH shims are not portable to Windows runners (#79)",
+)
+
 LIB = REPO_ROOT / "scripts" / "lib-git-common-dir.sh"
 TRANSCRIPT_LINE = json.dumps({"type": "user"}) + "\n"
 
@@ -120,9 +131,9 @@ class TestSaveSessionCapturesBeforeDetaching:
         env, _default_project, plugin, _calls, sid = gates._make_env(
             tmp_path, exchanges=5, humans=5, position=10,
         )
-        if with_lib:
-            # The shared stub plugin copies a fixed script list that predates the helper.
-            (plugin / "scripts" / LIB.name).write_text(LIB.read_text())
+        # The shared stub plugin copies the helper; the unknown-state case removes it.
+        if not with_lib:
+            (plugin / "scripts" / LIB.name).unlink()
         hooks = plugin / "hooks.d" / "after_save"
         hooks.mkdir(parents=True)
         dump = tmp_path / "after_save.env"
@@ -159,6 +170,9 @@ class TestSaveSessionCapturesBeforeDetaching:
         result, dump = self._save(tmp_path, worktree, with_lib=False)
         assert dump.is_file(), (result.stdout, result.stderr)
         assert dump.read_text().strip() == "unknown|"
+        assert "command not found" not in result.stderr, result.stderr
+        errors = tmp_path / "project" / ".remember" / "logs" / "hook-errors.log"
+        assert not errors.exists() or "command not found" not in errors.read_text()
 
 
 class TestRealResolutionPathWorktreeVanishesMidRun:

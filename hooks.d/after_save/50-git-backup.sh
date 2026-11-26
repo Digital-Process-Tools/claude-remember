@@ -27,6 +27,7 @@ source "$PIPELINE_DIR/scripts/log.sh"
 # _remember_git_common_dir (#1134). Missing means "could not tell" below, and the
 # guard declines on that rather than guessing.
 source "$PIPELINE_DIR/scripts/lib-git-common-dir.sh" 2>/dev/null || true
+declare -F _remember_git_common_dir >/dev/null || _remember_git_common_dir() { return 1; }
 
 # ── Activation guard ─────────────────────────────────────────────────────────
 REPO_ROOT=$(dirname "$REMEMBER_DIR")
