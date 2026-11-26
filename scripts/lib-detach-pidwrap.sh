@@ -22,14 +22,22 @@
 # Usage: lib-detach-pidwrap.sh OUTFILE PIDFILE CMD...
 # OUTFILE and PIDFILE may each independently be /dev/null to skip that
 # step (no redirect, or no liveness guard, at that call site).
+# #1132: MSYS rewrites a /dev/null argv entry to "nul" before wscript.exe
+# hands it to us, so the null device arrives as /dev/null OR nul (any case).
+_remember_pidwrap_is_null() {
+    case "$1" in
+        /dev/null|[Nn][Uu][Ll]) return 0 ;;
+    esac
+    return 1
+}
 _of="$1"
 shift
-if [ "$_of" != "/dev/null" ]; then
+if ! _remember_pidwrap_is_null "$_of"; then
     exec >>"$_of" 2>&1
 fi
 _pf="$1"
 shift
-if [ "$_pf" != "/dev/null" ]; then
+if ! _remember_pidwrap_is_null "$_pf"; then
     printf '%s' "$$" > "$_pf"
 fi
 exec "$@"
