@@ -59,6 +59,7 @@
   "reject_pattern": "",
   "handoff_mode": "single",
   "session_start_slow_threshold_s": 5,
+  "session_start_files": ["identity", "core", "today", "now", "recent", "archive"],
   "haiku": {
     "oauth_token": ""
   },
@@ -135,6 +136,18 @@
       "disable. When this is configured BELOW the bundled default, the",
       "over-cap notice says 'capped by config' and drops the /remember:doctor",
       "suggestion (#842) -- a deliberately lowered cap is not a broken store."
+    ],
+    "session_start_files": [
+      "Which memory files are handed to Claude when a session starts (#1136).",
+      "A list of any of: identity, core, today, now, recent, archive. Default is",
+      "all six, exactly as before. Example: [\"now\"] starts every session with",
+      "only the notes from the current working session; the other files stay on",
+      "disk and Claude can still search them when asked. The order you write does",
+      "not matter. A name that is not on the list is ignored and a warning is",
+      "logged; if NOTHING valid is left, all six are used so a typo can never",
+      "blank your memory. An empty list [] means start with no memory at all.",
+      "This picks WHICH files; thresholds.session_start_max_bytes still limits",
+      "how much of them fit. Edits take effect on the next session start."
     ],
     "session_start_max_bytes": [
       "Total byte budget (not characters -- see #842) for the whole",

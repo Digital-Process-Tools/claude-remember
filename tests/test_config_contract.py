@@ -44,7 +44,12 @@ _README_ROW = re.compile(r"^\|\s*`([a-z][A-Za-z0-9_.]*)`\s*\|")
 # resolved by lib-memory-dir.sh's own reader before REMEMBER_CONFIG exists, and
 # haiku.oauth_token is read by pipeline/haiku.py from the merged config in
 # Python. Both are genuinely wired — they just do not go through config().
-_NOT_VIA_CONFIG = {"data_dir", "haiku.oauth_token"}
+#
+# session_start_files (#1136) is an ARRAY, and the flattened table behind
+# config() skips arrays by design, so lib-memory-context.sh reads it with one jq
+# call instead (_remember_session_start_files_resolve). Its behaviour is pinned
+# end to end by tests/test_session_start_files_1136.py: not a dead option.
+_NOT_VIA_CONFIG = {"data_dir", "haiku.oauth_token", "session_start_files"}
 
 # Documented and read, but deliberately NOT shipped in config.example.json:
 # a `"timezone": ""` people copy is a landmine — an empty TZ falls back to UTC

@@ -134,7 +134,104 @@ _remember_memory_paths() {
     REMEMBER_NOW="$REMEMBER_DIR/now.md"
     REMEMBER_TODAY_FILE="$REMEMBER_DIR/today-${TODAY}.md"
 
-    MEMORY_FILES=("$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE")
+    # #1136: `session_start_files` picks which of the six are injected. The
+    # array keeps the canonical order whatever order the config lists them in.
+    _remember_session_start_files_resolve
+    MEMORY_FILES=()
+    case " $_REMEMBER_SESSION_FILES_SEL " in *" identity "*) MEMORY_FILES+=("$IDENTITY_FILE") ;; esac
+    case " $_REMEMBER_SESSION_FILES_SEL " in *" core "*) MEMORY_FILES+=("$CORE_MEMORIES") ;; esac
+    case " $_REMEMBER_SESSION_FILES_SEL " in *" today "*) MEMORY_FILES+=("$REMEMBER_TODAY_FILE") ;; esac
+    case " $_REMEMBER_SESSION_FILES_SEL " in *" now "*) MEMORY_FILES+=("$REMEMBER_NOW") ;; esac
+    case " $_REMEMBER_SESSION_FILES_SEL " in *" recent "*) MEMORY_FILES+=("$REMEMBER_RECENT") ;; esac
+    case " $_REMEMBER_SESSION_FILES_SEL " in *" archive "*) MEMORY_FILES+=("$REMEMBER_ARCHIVE") ;; esac
+}
+
+# Small helpers for the resolver below; each writes into the variable NAMED by
+# its first argument, so the caller pays no command substitution except for the
+# one jq read.
+_remember_session_files_slurp() {
+    IFS= read -r -d '' "$1" < "$REMEMBER_CONFIG" || true
+}
+
+_remember_session_files_read_raw() {
+    local _sf_out
+    _sf_out=$(_remember_run_jq -r '.session_start_files' "$REMEMBER_CONFIG" 2>/dev/null) || _sf_out=""
+    printf -v "$1" '%s' "$_sf_out"
+}
+
+# jq prints an array across several lines with brackets, quotes and commas
+# (the python fallback prints it compact); reduce either form to bare words.
+_remember_session_files_flatten() {
+    local _sf_v="${!1}"
+    _sf_v="${_sf_v//\[/ }"
+    _sf_v="${_sf_v//\]/ }"
+    _sf_v="${_sf_v//\"/ }"
+    _sf_v="${_sf_v//,/ }"
+    printf -v "$1" '%s' "$_sf_v"
+}
+
+# _remember_session_start_files_resolve (#1136)
+# Sets _REMEMBER_SESSION_FILES_SEL to the space-separated names (identity core
+# today now recent archive) SessionStart should inject, and
+# _REMEMBER_SESSION_FILES_KEY to the same set as a comma list ("none" for the
+# empty set) -- the form the #668 cache manifest records.
+#   key absent / null / unreadable   -> all six (the pre-1136 behaviour)
+#   ["now", ...]  or  "now"          -> exactly those, unknown names ignored
+#   []                               -> none (an explicit choice, honoured)
+#   only unknown names               -> all six, with a warning: a typo must
+#                                       never silently blank the memory
+# Never fails the caller. config_into cannot read an array (the flattened
+# table skips them, by design), so the value is read with one jq call -- and
+# only when the config text mentions the key at all, so the default path
+# stays fork-free.
+_remember_session_start_files_resolve() {
+    local _all="identity core today now recent archive"
+    _REMEMBER_SESSION_FILES_SEL="$_all"
+    local _txt="" _raw="" _trim="" _w _n _sel=" " _bad="" _any=0 _noglob=0
+    if [ -f "${REMEMBER_CONFIG:-}" ]; then
+        _remember_session_files_slurp _txt
+    fi
+    if [[ "$_txt" == *session_start_files* ]]; then
+        if type _remember_run_jq >/dev/null 2>&1 && [ -n "${JQ:-}" ]; then
+            _remember_session_files_read_raw _raw
+        else
+            type log >/dev/null 2>&1 && log "memory-context" "WARNING: session_start_files could not be read (no jq helper) -- injecting all memory files"
+        fi
+    fi
+    _trim="${_raw//[[:space:]]/}"
+    if [ -n "$_trim" ] && [ "$_trim" != "null" ]; then
+        if [ "$_trim" = "[]" ]; then
+            _REMEMBER_SESSION_FILES_SEL=""
+        else
+            _remember_session_files_flatten _raw
+            case $- in *f*) _noglob=1 ;; *) set -f ;; esac
+            for _w in $_raw; do
+                if [[ " $_all " == *" $_w "* ]]; then
+                    _sel="${_sel}${_w} "
+                    _any=1
+                else
+                    _bad="${_bad}${_bad:+, }${_w}"
+                fi
+            done
+            [ "$_noglob" = 1 ] || set +f
+            if [ -n "$_bad" ] && type log >/dev/null 2>&1; then
+                log "memory-context" "WARNING: session_start_files: ignoring unknown value(s): ${_bad} (allowed: identity, core, today, now, recent, archive)"
+            fi
+            if [ "$_any" = 1 ]; then
+                _REMEMBER_SESSION_FILES_SEL=""
+                for _n in $_all; do
+                    [[ "$_sel" == *" $_n "* ]] && _REMEMBER_SESSION_FILES_SEL="${_REMEMBER_SESSION_FILES_SEL}${_REMEMBER_SESSION_FILES_SEL:+ }${_n}"
+                done
+            else
+                type log >/dev/null 2>&1 && log "memory-context" "WARNING: session_start_files has no valid value -- injecting all memory files"
+            fi
+        fi
+    fi
+    if [ -n "$_REMEMBER_SESSION_FILES_SEL" ]; then
+        _REMEMBER_SESSION_FILES_KEY="${_REMEMBER_SESSION_FILES_SEL// /,}"
+    else
+        _REMEMBER_SESSION_FILES_KEY="none"
+    fi
 }
 
 # _remember_render_memory_section
@@ -879,6 +976,10 @@ _remember_render_memory_section() {
     local MFILE HAS_MEMORY="" ROTATED_SLICES _remember_rotated_glob_dir
     local _remember_rotated_arr=()
 
+    # #1136: session_start_files = [] means inject no memory at all. Return
+    # before anything below iterates the (empty) array: "${arr[@]}" on an
+    # empty array is an unbound-variable error under set -u on bash < 4.4.
+    [ "${#MEMORY_FILES[@]}" -gt 0 ] || return 0
     for MFILE in "${MEMORY_FILES[@]}"; do
         [ -f "$MFILE" ] && HAS_MEMORY="true"
     done
@@ -1142,7 +1243,8 @@ _remember_render_memory_section() {
 # HIT (see _remember_start_cache_context_load), so mtimes alone cannot
 # catch this. A mismatched or entirely absent VERSION= line in the
 # manifest is always a miss; see the loader below.
-_REMEMBER_CACHE_FORMAT_VERSION="2"
+# 3 (#1136): the manifest now records the session_start_files selection.
+_REMEMBER_CACHE_FORMAT_VERSION="3"
 
 # _remember_start_cache_manifest_lines
 # Echoes, one per line, "SRC=<path>" for every input the render depends on,
@@ -1153,7 +1255,11 @@ _REMEMBER_CACHE_FORMAT_VERSION="2"
 _remember_start_cache_manifest_lines() {
     local MFILE
     printf 'VERSION=%s\n' "$_REMEMBER_CACHE_FORMAT_VERSION"
-    for MFILE in "${MEMORY_FILES[@]}"; do
+    # #1136: the selection itself is part of the key, not just the mtimes of
+    # the config files that name it -- a config restored with an old mtime
+    # (git checkout, cp -p) must not keep serving the previous selection.
+    printf 'SFILES=%s\n' "${_REMEMBER_SESSION_FILES_KEY:-}"
+    for MFILE in ${MEMORY_FILES[@]+"${MEMORY_FILES[@]}"}; do
         printf 'SRC=%s\n' "$MFILE"
     done
     # REMEMBER_DIR itself: catches a rotated slice appearing or disappearing
@@ -1212,7 +1318,7 @@ _remember_start_cache_context_load() {
     _remember_may_inject "$_cache" "start-cache" || return 1
     _remember_may_inject "$_manifest" "start-cache" || return 1
 
-    local _line _src _mf_version="" _mf_saw_src=0
+    local _line _src _mf_version="" _mf_saw_src=0 _mf_sfiles=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
@@ -1221,6 +1327,9 @@ _remember_start_cache_context_load() {
         # directory's scanner holds a submission on).
         if [ "${_line#VERSION=}" != "$_line" ]; then
             _mf_version="${_line#VERSION=}"
+            continue
+        elif [ "${_line#SFILES=}" != "$_line" ]; then
+            _mf_sfiles="SET:${_line#SFILES=}"
             continue
         elif [ "${_line#SRC=}" != "$_line" ]; then
             _src="${_line#SRC=}"
@@ -1248,6 +1357,9 @@ _remember_start_cache_context_load() {
     # must never be served -- see _REMEMBER_CACHE_FORMAT_VERSION above for
     # why mtimes alone cannot catch this.
     [ "$_mf_version" = "$_REMEMBER_CACHE_FORMAT_VERSION" ] || return 1
+    # #1136: a cache rendered for a different session_start_files selection
+    # (or one with no SFILES= line at all) is a miss, whatever the mtimes say.
+    [ "$_mf_sfiles" = "SET:${_REMEMBER_SESSION_FILES_KEY:-}" ] || return 1
 
     # Direct `cat`, not a command substitution: this stdout IS the function's
     # contract (test_start_context_cache_668.py asserts it byte-identical to
