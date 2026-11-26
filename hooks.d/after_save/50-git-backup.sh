@@ -95,6 +95,17 @@ _gb_common_dir() {
     _gb_realpath "$_out"
 }
 
+# Fail CLOSED when the project is gone (#1134). This hook runs detached, so an
+# orchestrator may have removed the linked worktree PROJECT_DIR names before it
+# fires. Its common dir is then unreadable (empty), the equality check below is
+# skipped, and a REPO_ROOT that is really the project's main checkout would be
+# committed and pushed to. A vanished project cannot be proven distinct from the
+# backup repo, so decline rather than guess; the next save retries.
+if [ ! -d "$PROJECT_DIR" ]; then
+    log "git-backup" "declined: PROJECT_DIR ($PROJECT_DIR) no longer exists, so it cannot be established that $REPO_ROOT is not the project's own repository -- nothing is committed or pushed this run."
+    exit 0
+fi
+
 PROJECT_COMMON_DIR=$(_gb_common_dir "$PROJECT_DIR") || PROJECT_COMMON_DIR=""
 BACKUP_COMMON_DIR=$(_gb_common_dir "$REPO_ROOT") || BACKUP_COMMON_DIR=""
 if [ -n "$PROJECT_COMMON_DIR" ] && [ "$PROJECT_COMMON_DIR" = "$BACKUP_COMMON_DIR" ]; then

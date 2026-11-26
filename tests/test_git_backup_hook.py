@@ -872,6 +872,51 @@ class TestGitBackupNeverTouchesProjectRepo:
         assert _commit_log(leaked) == [], "the leaked repo must never be committed to"
 
 
+class TestGitBackupFailsClosedWhenProjectDirGone:
+    """#1134: the #138 guard must fail CLOSED, not open.
+
+    The after_save hook runs detached, so an orchestrator can remove the linked
+    worktree PROJECT_DIR names before it fires. The project's common dir is then
+    unreadable, the equality check used to be skipped, and the hook committed and
+    pushed .remember/ into the project repo.
+    """
+
+    def test_gone_project_dir_does_not_commit_into_project_repo(self, tmp_path):
+        main, worktree = _make_worktree_project(tmp_path)
+        remember_dir = main / ".remember"
+        remember_dir.mkdir()
+        (remember_dir / ".gitignore").write_text("*\n")
+        (remember_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+        _git(main, ["worktree", "remove", "--force", str(worktree)])
+        assert not worktree.exists()
+
+        commits_before = _commit_log(main)
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(remember_dir, worktree, tmp_path / "home", config_path=cfg)
+
+        assert result.returncode == 0
+        assert (remember_dir / ".gitignore").exists(), "protective .gitignore must survive"
+        wait_for_lock_release(main / ".git-backup.lock")
+        assert _commit_log(main) == commits_before, "project repo must not be committed to"
+
+    def test_existing_non_git_project_dir_still_backs_up_to_external_repo(self, tmp_path):
+        """Positive control: the closed arm must not swallow a legit backup."""
+        home, remember, _ = make_external_remember_repo(tmp_path)
+        project = tmp_path / "plain-project"
+        project.mkdir()
+        slug_dir = remember / "test-slug"
+        slug_dir.mkdir()
+        (slug_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(slug_dir, project, home, config_path=cfg)
+        assert result.returncode == 0
+        wait_for_lock_release(remember / ".git-backup.lock")
+
+        assert len(_commit_log(remember)) == 2
+
+
 class TestConfigIsReadBeforeBackgrounding:
     """Every git_backup.* value must be read in the parent, not the subshell.
 
