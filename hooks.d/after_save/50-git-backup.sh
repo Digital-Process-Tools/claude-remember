@@ -26,7 +26,10 @@ set -u  # not -e -- we never want to fail loudly here
 source "$PIPELINE_DIR/scripts/log.sh"
 # _remember_git_common_dir (#1134). Missing means "could not tell" below, and the
 # guard declines on that rather than guessing.
-source "$PIPELINE_DIR/scripts/lib-git-common-dir.sh" 2>/dev/null || true
+# Tested first: bash 3.2 (macOS /bin/bash) ends a non-interactive script when `source` misses.
+if [ -f "$PIPELINE_DIR/scripts/lib-git-common-dir.sh" ]; then
+    source "$PIPELINE_DIR/scripts/lib-git-common-dir.sh"
+fi
 declare -F _remember_git_common_dir >/dev/null || _remember_git_common_dir() { return 1; }
 
 # ── Activation guard ─────────────────────────────────────────────────────────

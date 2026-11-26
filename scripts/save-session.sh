@@ -120,7 +120,11 @@ source "$_SAVE_SCRIPT_DIR/lib-lock.sh"
 source "$_SAVE_SCRIPT_DIR/lib-staging-lock.sh"
 # #1134. A missing file leaves _remember_git_common_dir undefined, which the capture
 # below reads as "could not tell" (state unknown) -- the closed answer, not a crash.
-source "$_SAVE_SCRIPT_DIR/lib-git-common-dir.sh" 2>/dev/null || true
+# Tested first, not `source ... || true`: bash 3.2 (the macOS /bin/bash) ends a
+# non-interactive script outright when `source` cannot find its file.
+if [ -f "$_SAVE_SCRIPT_DIR/lib-git-common-dir.sh" ]; then
+    source "$_SAVE_SCRIPT_DIR/lib-git-common-dir.sh"
+fi
 log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
 
 # #1134: ask NOW, while PROJECT_DIR is still the checkout it names, which git
