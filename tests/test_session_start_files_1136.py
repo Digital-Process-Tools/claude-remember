@@ -238,7 +238,7 @@ def test_only_the_session_start_path_logs_the_warning(tmp_path):
 
 
 def _jq_shim(base: Path, env: dict) -> Path:
-    real = subprocess.run(["which", "jq"], capture_output=True, text=True, check=False).stdout.strip()
+    real = shutil.which("jq")
     if not real:
         pytest.skip("no jq on PATH to shim")
     shim_dir = base / "shim"
@@ -351,7 +351,11 @@ def test_manifest_names_the_deselected_files(tmp_path):
     remember, _, env = _store(tmp_path, {"session_start_files": ["now"]})
     assert _call("publish", env).returncode == 0
     manifest = (remember / "tmp" / "start-context.manifest").read_text()
-    assert "SRC=" + str(remember / "recent.md") in manifest
+    # compare in the form the shell writes (slashes, drive style), not str(Path)
+    assert any(
+        line.startswith("SRC=") and line.replace(chr(92), "/").endswith("/recent.md")
+        for line in manifest.splitlines()
+    )
     cache = remember / "tmp" / "start-context.cache"
     t = time.time() + 5
     os.utime(cache, (t, t))
@@ -391,10 +395,12 @@ def _have_jq() -> bool:
 
 
 def _flatten_both(cfg_path: Path):
+    # UTF-8, not the locale codepage; and jq on Windows may end lines with CRLF
     jq = subprocess.run(["jq", "-r", "-f", str(REPO_ROOT / "scripts" / "cfg_flatten.jq"), str(cfg_path)],
-                        capture_output=True, text=True, check=False)
+                        capture_output=True, text=True, encoding="utf-8", check=False)
     py = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "cfg_flatten.py"), str(cfg_path)],
-                        capture_output=True, text=True, check=False)
+                        capture_output=True, text=True, encoding="utf-8", check=False)
+    jq.stdout = jq.stdout.replace(chr(13) + chr(10), chr(10))
     return jq, py
 
 EDGE_DOCS = [
@@ -562,3 +568,16 @@ def test_a_failed_typed_read_injects_all_six_with_a_warning(tmp_path, value):
     _failing_typed_jq_shim(tmp_path / "fail", env2)
     assert _present(_call("render", env2).stdout) == ALL_HEADERS
     assert "could not be read" in _note(env2)
+
+def test_python_flattener_writes_utf8_whatever_the_console_codepage(tmp_path):
+    """A value the console codepage cannot encode used to raise, print nothing
+    and read as a declined config (seen on Windows with cp1252)."""
+    cfg = tmp_path / "c.json"
+    cfg.write_text(json.dumps({"x": "caf" + chr(0xE9) + " " + chr(0x2603), "y": "plain"}), encoding="utf-8")
+    env = {**os.environ, "PYTHONIOENCODING": "ascii"}
+    r = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "cfg_flatten.py"), str(cfg)],
+                       capture_output=True, env=env, check=False)
+    assert r.returncode == 0, r.stderr
+    lines = r.stdout.decode("utf-8").split(chr(10))
+    assert "y" + chr(9) + "plain" in lines, "positive control: ordinary rows are there"
+    assert "x" + chr(9) + "caf" + chr(0xE9) + " " + chr(0x2603) in lines

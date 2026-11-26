@@ -200,8 +200,11 @@ _remember_session_start_files_resolve() {
     local _usetyped=0
     # Load the table first (config_into would, lazily) so a refused config does
     # not also pay config_into's own per-key read before the typed one below.
-    if [ -z "${_REMEMBER_CFG_STATE:-}" ] || [ "${_REMEMBER_CFG_LOADED_FROM:-}" != "${REMEMBER_CONFIG:-}" ]; then
-        _config_load
+    # Harnesses that source this file with a stubbed config() have no table.
+    if type _config_load >/dev/null 2>&1; then
+        if [ -z "${_REMEMBER_CFG_STATE:-}" ] || [ "${_REMEMBER_CFG_LOADED_FROM:-}" != "${REMEMBER_CONFIG:-}" ]; then
+            _config_load
+        fi
     fi
     if [ "${_REMEMBER_CFG_STATE:-}" != "ok" ] && [ "${JQ:-}" = jq ] && [ -f "${REMEMBER_CONFIG:-}" ]; then
         # The flattener declined this config (slow path already): ask jq for

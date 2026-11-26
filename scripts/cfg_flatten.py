@@ -103,7 +103,10 @@ def main() -> None:
         out.append(".".join(p) + "__arr\t" + encode_list(v))
     for k in objects:
         out.append(k + "__obj\t#object")
-    sys.stdout.write("\n".join(out))
+    # UTF-8 bytes, never the console codepage: a value with a character the
+    # codepage cannot encode (cp1252 on Windows) used to raise here, print
+    # nothing and read as a declined config.
+    sys.stdout.buffer.write("\n".join(out).encode("utf-8"))
 
 
 if __name__ == "__main__":
