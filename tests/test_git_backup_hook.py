@@ -900,6 +900,44 @@ class TestGitBackupFailsClosedWhenProjectDirGone:
         wait_for_lock_release(main / ".git-backup.lock")
         assert _commit_log(main) == commits_before, "project repo must not be committed to"
 
+    def test_recreated_stub_project_dir_does_not_commit_into_project_repo(self, tmp_path):
+        """The reporter's real case: the pipeline re-created PROJECT_DIR as a stub.
+
+        The worktree is gone, then <wt>/.remember/logs reappears, so the dir exists
+        but is not a git checkout. Only the common dir captured by save-session
+        while the project was live can still tell the hook REPO_ROOT is the project.
+        """
+        main, worktree = _make_worktree_project(tmp_path)
+        remember_dir = main / ".remember"
+        remember_dir.mkdir()
+        (remember_dir / ".gitignore").write_text("*\n")
+        (remember_dir / "now.md").write_text("## 10:00 | test\nMemory.\n")
+        captured = str((main / ".git").resolve())
+        _git(main, ["worktree", "remove", "--force", str(worktree)])
+        (worktree / ".remember" / "logs").mkdir(parents=True)
+
+        commits_before = _commit_log(main)
+        cfg = _make_config(tmp_path, cooldown=0)
+
+        result = _run_hook(
+            remember_dir, worktree, tmp_path / "home", config_path=cfg,
+            extra_env={
+                "REMEMBER_PROJECT_COMMON_DIR": captured,
+                "REMEMBER_PROJECT_COMMON_DIR_SET": "1",
+            },
+        )
+
+        assert result.returncode == 0
+        assert (remember_dir / ".gitignore").exists()
+        wait_for_lock_release(main / ".git-backup.lock")
+        assert _commit_log(main) == commits_before, "project repo must not be committed to"
+
+    def test_save_session_captures_common_dir_before_dispatching_after_save(self):
+        """The capture must live in save-session, ahead of the detached dispatch."""
+        text = (HOOK.parent.parent.parent / "scripts" / "save-session.sh").read_text()
+        assert "export REMEMBER_PROJECT_COMMON_DIR" in text
+        assert text.index("REMEMBER_PROJECT_COMMON_DIR_SET=1") < text.index('dispatch "after_save"')
+
     def test_existing_non_git_project_dir_still_backs_up_to_external_repo(self, tmp_path):
         """Positive control: the closed arm must not swallow a legit backup."""
         home, remember, _ = make_external_remember_repo(tmp_path)

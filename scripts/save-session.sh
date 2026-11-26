@@ -112,6 +112,20 @@ _SAVE_SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_SAVE_SCRIPT_DIR" = "${BASH_SOURCE[0]}" ] && _SAVE_SCRIPT_DIR="$(pwd)"
 
 source "$_SAVE_SCRIPT_DIR/resolve-paths.sh"
+
+# #1134: capture the project's git common dir NOW, while PROJECT_DIR is still
+# the checkout it names. The after_save git-backup hook runs detached, and an
+# orchestrator may remove a linked worktree before it fires -- or something
+# re-creates the path as a bare stub -- leaving nothing to ask. The hook compares
+# against this captured value instead of a live lookup that can no longer answer.
+# Empty is a real answer (PROJECT_DIR is not a git checkout) and is told apart
+# from "never captured" by the _SET marker.
+REMEMBER_PROJECT_COMMON_DIR=""
+if [ -d "$PROJECT_DIR" ]; then
+    REMEMBER_PROJECT_COMMON_DIR=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || REMEMBER_PROJECT_COMMON_DIR=""
+fi
+REMEMBER_PROJECT_COMMON_DIR_SET=1
+export REMEMBER_PROJECT_COMMON_DIR REMEMBER_PROJECT_COMMON_DIR_SET
 source "$_SAVE_SCRIPT_DIR/detect-tools.sh"
 source "$_SAVE_SCRIPT_DIR/bootstrap-dirs.sh"
 source "$_SAVE_SCRIPT_DIR/log.sh"

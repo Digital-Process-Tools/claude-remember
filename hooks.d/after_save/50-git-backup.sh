@@ -106,7 +106,16 @@ if [ ! -d "$PROJECT_DIR" ]; then
     exit 0
 fi
 
-PROJECT_COMMON_DIR=$(_gb_common_dir "$PROJECT_DIR") || PROJECT_COMMON_DIR=""
+# Prefer the value save-session captured while the project was still live (#1134);
+# a live lookup is only the fallback for a caller that did not provide one.
+if [ "${REMEMBER_PROJECT_COMMON_DIR_SET:-0}" = 1 ]; then
+    PROJECT_COMMON_DIR=""
+    if [ -n "${REMEMBER_PROJECT_COMMON_DIR:-}" ]; then
+        PROJECT_COMMON_DIR=$(_gb_realpath "$REMEMBER_PROJECT_COMMON_DIR") || PROJECT_COMMON_DIR=""
+    fi
+else
+    PROJECT_COMMON_DIR=$(_gb_common_dir "$PROJECT_DIR") || PROJECT_COMMON_DIR=""
+fi
 BACKUP_COMMON_DIR=$(_gb_common_dir "$REPO_ROOT") || BACKUP_COMMON_DIR=""
 if [ -n "$PROJECT_COMMON_DIR" ] && [ "$PROJECT_COMMON_DIR" = "$BACKUP_COMMON_DIR" ]; then
     debug_enabled 0 && \
