@@ -163,10 +163,6 @@ _REMEMBER_CFG_LOADED_FROM=""
 _REMEMBER_CFG_NAMES=()
 _REMEMBER_CFG_VALUES=()
 
-# Version of the row format scripts/cfg_flatten.jq / .py emit, recorded in the
-# flatten cache header (#1136: arrays of names became rows). Bump it whenever
-# the flatteners start emitting something an older build never did.
-_REMEMBER_CFG_FLATTEN_VERSION="2"
 
 _remember_cfg_table_set() {
     _REMEMBER_CFG_NAMES+=("$1")
@@ -332,31 +328,34 @@ _remember_cfg_flatten_cache_path() {
     # collision only ever costs a rejected/regenerated cache, never a wrong
     # one, because the value is never trusted from the filename alone.
     [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
-    # `-v2-`: #864 changed the on-disk FORMAT (see the comment above
-    # _remember_cfg_flatten_q_encode below), so a cache an older build
-    # already wrote under the OLD name must never be opened as if it were
-    # one of these -- it is simply a different file, at a different path,
-    # that this build never looks at; no version line or migration logic
-    # needed inside the file itself.
-    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
+    # The version segment names the on-disk FORMAT and the ROW SET: `-v2-`
+    # (#864) changed the encoding (see the comment above
+    # _remember_cfg_flatten_q_encode below); `-v3-` (#1136) is the first to
+    # carry array and object-marker rows. A cache an older build wrote under an
+    # older name must never be opened as if it were one of these -- it is
+    # simply a different file, at a different path, that this build never
+    # looks at (and never deletes: builds of different ages sharing one TMPDIR
+    # each keep their own file); no version line or migration logic needed
+    # inside the file itself.
+    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v3-${_slug}"
 }
 
 # #888: the OLD (pre-#864) cache name -- the real path above, minus the
-# literal `-v2-` segment. Nothing ever opens this path; it exists only so
+# literal `-v3-` segment. Nothing ever opens this path; it exists only so
 # _remember_cfg_flatten_cache_publish below can best-effort remove the
 # orphan an install upgrading from <=0.38.0 left behind.
 _remember_cfg_flatten_cache_path_v1() {
     local _v2 _dir _base
     _v2=$(_remember_cfg_flatten_cache_path) || return 1
-    # #972: anchor the substitution to the filename's own -v2- segment, not
-    # the first occurrence anywhere in the full path -- a bare `${_v2/-v2-/-}`
+    # #972: anchor the substitution to the filename's own -v3- segment, not
+    # the first occurrence anywhere in the full path -- a bare substitution
     # over the WHOLE path matches inside ${TMPDIR:-/tmp} itself when that
-    # path happens to contain the literal substring -v2- (e.g.
-    # TMPDIR=/mnt/build-v2-staging/tmp), producing a v1 path that does not
+    # path happens to contain the literal substring -v3- (e.g.
+    # TMPDIR=/mnt/build-v3-staging/tmp), producing a v1 path that does not
     # name the real pre-#864 orphan at all.
     _dir="${_v2%/*}"
     _base="${_v2##*/}"
-    printf '%s' "${_dir}/${_base/-v2-/-}"
+    printf '%s' "${_dir}/${_base/-v3-/-}"
 }
 
 _remember_cfg_flatten_cache_sources() {
@@ -562,14 +561,6 @@ _remember_cfg_flatten_cache_load() {
                 _bad=1
                 break
             fi
-        elif [ "$_stage" = "2" ]; then
-            # #1136: the third header line names the FLATTENER version the
-            # rows were produced by. A cache an older build wrote (no such
-            # line, or another number) lacks rows the current flattener
-            # emits -- an array of names, say -- and must never be served: the
-            # file name and the two lines above are unchanged by that.
-            _stage=3
-            [ "$_line" = "#FLATTEN=${_REMEMBER_CFG_FLATTEN_VERSION}" ] || { _bad=1; break; }
         elif _remember_cfg_flatten_cache_valid_line "$_line"; then
             _lines[${#_lines[@]}]="$_line"
         else
@@ -581,7 +572,7 @@ _remember_cfg_flatten_cache_load() {
     # header lines were seen (including "no identity line" -- see above):
     # distrust the WHOLE file, and remove it, so the next start does not
     # re-read the same poison and re-pay this same rejection forever.
-    if [ -n "$_bad" ] || [ "$_stage" != "3" ]; then
+    if [ -n "$_bad" ] || [ "$_stage" != "2" ]; then
         rm -f "$_f" 2>/dev/null
         return 1
     fi
@@ -654,7 +645,7 @@ _remember_cfg_flatten_cache_publish() {
         _remember_cfg_flatten_q_encode _encoded_dir "${REMEMBER_DIR:-}"
         printf '#REMEMBER_DIR=%s\n' "$_encoded_dir"
         printf '#RCFG_EXISTS=%s\n' "$_exists_now"
-        printf '#FLATTEN=%s\n' "$_REMEMBER_CFG_FLATTEN_VERSION"
+
         local _encoded_v
         while IFS=$'\t' read -r _k _v; do
             [ -n "$_k" ] || continue
@@ -668,15 +659,16 @@ _remember_cfg_flatten_cache_publish() {
     # to skip a second subshell) left behind by an install that upgraded
     # across #864 before this fix existed. Harmless either way -- never
     # required for correctness, same as every other failure path above.
-    # #972: anchor to the basename's own -v2- segment, not the first
+    # #972: anchor to the basename's own -v3- segment, not the first
     # occurrence anywhere in the full path -- see the matching comment in
     # _remember_cfg_flatten_cache_path_v1 above for why a bare substring
     # substitution over $_f is wrong when ${TMPDIR:-/tmp} itself contains
-    # the literal substring -v2-.
+    # the literal substring -v3-. Only the version-less name is ever removed:
+    # an older build's -v2- file belongs to that build and stays (#1136).
     local _f_dir="${_f%/*}"
     local _f_base="${_f##*/}"
-    local _f_v1="${_f_dir}/${_f_base/-v2-/-}"
-    [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
+    local _f_v1="${_f_dir}/${_f_base/-v3-/-}"
+    [ "$_f_v1" != "$_f" ] && [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
     return 0
 }
 

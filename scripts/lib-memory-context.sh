@@ -176,62 +176,69 @@ _remember_memory_paths() {
 #   []                               -> none (an explicit choice, honoured)
 #   anything else, or only unknown   -> all six, with a warning note: a typo
 #                                       must never silently blank the memory
-# The value comes through config_into like every other key: the shared
-# flattener (cfg_flatten.jq / .py) carries an array of single plain names as one
-# bracketed row, "[a b]" ("[]" when empty), and any other array as "#invalid".
-# The per-key fallback read (a config the flattener declined) returns the JSON
-# text instead, which is held to the same rule: a JSON array of single names
-# only. A plain string must be exactly one name. No jq or python is run here, so
-# SessionStart cache hits, saves and consolidation pay nothing for the key.
-# Never fails the caller, never logs: only the SessionStart hook reports the
-# note (_remember_session_start_files_warn).
+# The value comes through config_into like every other key. The shared
+# flattener (cfg_flatten.jq / .py) carries an array of single plain names as its
+# own row, "<key>__arr" = "=" followed by the space-joined names ("=" alone when
+# empty, "#invalid" for any other array), and any top-level object as a
+# "<key>__obj" marker row, so a plain string can never be mistaken for a list.
+# When the flattener declined the config (state not "ok"), the per-key fallback
+# read returns the JSON text instead, held to the same rule: a JSON array of
+# single names only. (There a string whose text is "[]" cannot be told from an
+# empty array.) No jq or python is run here, so SessionStart cache hits, saves
+# and consolidation pay nothing for the key. Never fails the caller, never logs:
+# only the SessionStart hook reports the note (_remember_session_start_files_warn).
 _remember_session_start_files_resolve() {
     local LC_ALL=C
     local _all="identity core today now recent archive"
-    local _val="" _inner="" _w _n _sel=" " _bad="" _any=0 _noglob=0 _q="" _words="" _isnote=0
+    local _val="" _arr="" _obj="" _inner="" _w _n _sel=" " _bad="" _any=0 _noglob=0 _q="" _words="" _isnote=0
     local _re='^[[:space:]]*("[A-Za-z0-9_-]+"[[:space:]]*(,[[:space:]]*"[A-Za-z0-9_-]+"[[:space:]]*)*)?$'
+    local _tail=" - injecting all memory files"
     printf -v _q '\042'
     _REMEMBER_SESSION_FILES_SEL="$_all"
     _REMEMBER_SESSION_FILES_NOTE=""
     config_into _val ".session_start_files" ""
-    if [ -z "$_val" ]; then
-        # Absent or null: all six, silently. An object under the key is not
-        # carried as a row, but its children are (session_start_files_<k>).
-        for _n in ${_REMEMBER_CFG_NAMES[@]+"${_REMEMBER_CFG_NAMES[@]}"}; do
-            if [[ "$_n" == _RCFG_session_start_files_* ]]; then
-                _REMEMBER_SESSION_FILES_NOTE="session_start_files is not a list of names - injecting all memory files"
-                break
+    if [ "${_REMEMBER_CFG_STATE:-}" = "ok" ]; then
+        config_into _arr ".session_start_files__arr" ""
+        config_into _obj ".session_start_files__obj" ""
+        if [ -n "$_arr" ]; then
+            if [ "$_arr" = "#invalid" ]; then
+                _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+                _isnote=1
+            else
+                _words="${_arr#=}"
             fi
-        done
-        _isnote=1
-    elif [ "$_val" = "#invalid" ]; then
-        _REMEMBER_SESSION_FILES_NOTE="session_start_files has an entry that is not a single plain name - injecting all memory files"
+        elif [ -n "$_obj" ]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        elif [ -z "$_val" ]; then
+            _isnote=1
+        elif [[ "$_val" == *[[:space:]]* ]]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        else
+            _words="$_val"
+        fi
+    elif [ -z "$_val" ]; then
         _isnote=1
     elif [[ "$_val" == "["*"]" ]]; then
         _inner="${_val#[}"
         _inner="${_inner%]}"
-        if [[ "$_inner" == *"$_q"* ]]; then
-            # JSON text (per-key fallback): single plain names only.
-            if [[ "$_inner" =~ $_re ]]; then
-                _inner="${_inner//$_q/ }"
-                _words="${_inner//,/ }"
-            else
-                _REMEMBER_SESSION_FILES_NOTE="session_start_files has an entry that is not a single plain name - injecting all memory files"
-                _isnote=1
-            fi
+        if [[ "$_inner" =~ $_re ]]; then
+            _inner="${_inner//$_q/ }"
+            _words="${_inner//,/ }"
         else
-            _words="$_inner"
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
         fi
-    elif [[ "$_val" == *[[:space:]]* ]]; then
-        _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of names or one name - injecting all memory files"
+    elif [[ "$_val" == *[[:space:]]* || "$_val" == "{"* ]]; then
+        _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
         _isnote=1
     else
         _words="$_val"
     fi
     if [ "$_isnote" = 0 ]; then
-        _val="$_words"
         if [[ $- == *f* ]]; then _noglob=1; else set -f; fi
-        for _w in $_val; do
+        for _w in $_words; do
             if [[ " $_all " == *" $_w "* ]]; then
                 _sel="${_sel}${_w} "
                 _any=1
@@ -251,7 +258,7 @@ _remember_session_start_files_resolve() {
                 _REMEMBER_SESSION_FILES_NOTE="session_start_files: ignoring unknown value(s): ${_bad} (allowed: identity, core, today, now, recent, archive)"
             fi
         elif [ -n "$_bad" ]; then
-            _REMEMBER_SESSION_FILES_NOTE="session_start_files has no valid value (${_bad}) - injecting all memory files"
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files has no valid value (${_bad})${_tail}"
         else
             _REMEMBER_SESSION_FILES_SEL=""
         fi

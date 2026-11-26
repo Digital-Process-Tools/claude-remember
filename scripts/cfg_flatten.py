@@ -34,12 +34,14 @@ def walk(node, prefix, out):
 
 
 def encode_list(items) -> str:
-    """Same encoding as cfg_flatten.jq: "[a b]" for an array of single plain
-    names ("[]" when empty), "#invalid" for anything else (#1136). Whitespace
-    is exactly space, tab, newline and carriage return -- the jq side's set."""
+    """Same encoding as cfg_flatten.jq: "=" followed by the space-joined names
+    for an array of single plain names, "#invalid" for anything else (#1136).
+    The row itself is named "<key>__arr", so no string value can be mistaken
+    for one. Whitespace is exactly space, tab, newline and carriage return --
+    the jq side's set."""
     if any(not isinstance(i, str) or re.search(r"[ \t\n\r]", i) for i in items):
         return "#invalid"
-    return "[" + " ".join(items) + "]"
+    return "=" + " ".join(items)
 
 
 def main() -> None:
@@ -56,43 +58,46 @@ def main() -> None:
         for p, v in rows
         if p and p[0] not in ("haiku", "_comments")
     ]
-    arrays = [(p, v) for p, v in rows if isinstance(v, list)]
-    rows = [(p, v) for p, v in rows if not isinstance(v, list)]
+    ok = re.compile(r"\A[A-Za-z0-9_]+\Z")
+    scalars = [(p, v) for p, v in rows if not isinstance(v, list)]
+    # An array whose key is outside the alphabet is not carried (it never
+    # causes that refusal) but still takes part in the collision refusal.
+    arrays = [
+        (p, v) for p, v in rows if isinstance(v, list) and all(ok.match(part) for part in p)
+    ]
+    objects = []
+    if isinstance(doc, dict):
+        objects = [
+            k
+            for k, v in doc.items()
+            if isinstance(v, dict) and k not in ("haiku", "_comments") and ok.match(k)
+        ]
 
-    ok = re.compile(r"^[A-Za-z0-9_]+$")
     # Same order as cfg_flatten.jq: every key, then collisions, then values.
-    for p, v in rows:
+    for p, v in scalars:
         if not all(ok.match(part) for part in p):
             print("#refuse a config key is outside [A-Za-z0-9_]")
             sys.exit(0)
-    slots = ["_".join(p) for p, _ in rows]
+    slots = ["_".join(p) for p, _ in scalars + arrays]
     if len(set(slots)) != len(slots):
         print("#refuse two config keys flatten to the same name")
         sys.exit(0)
-    for p, v in rows:
+    for p, v in scalars:
         if isinstance(v, str) and ("\t" in v or "\n" in v):
             print("#refuse a config value contains a tab or a newline")
             sys.exit(0)
 
-    # #1136: an array never causes a refusal and never displaces a scalar --
-    # one whose key is outside the alphabet, or whose flattened name another
-    # key already holds, is simply not carried (same rule as cfg_flatten.jq).
-    taken = set(slots)
-    arrays = [
-        (p, v) for p, v in arrays if all(ok.match(part) for part in p) and "_".join(p) not in taken
-    ]
-    names = ["_".join(p) for p, _ in arrays]
-    arrays = [(p, v) for (p, v), n in zip(arrays, names) if names.count(n) == 1]
-
     out = []
     # A null value takes part in every refusal above (as in cfg_flatten.jq,
     # where its path is still a path) but is never emitted.
-    for p, v in rows:
+    for p, v in scalars:
         if v is None:
             continue
         out.append(".".join(p) + "\t" + (v if isinstance(v, str) else json.dumps(v)))
     for p, v in arrays:
-        out.append(".".join(p) + "\t" + encode_list(v))
+        out.append(".".join(p) + "__arr\t" + encode_list(v))
+    for k in objects:
+        out.append(k + "__obj\t#object")
     sys.stdout.write("\n".join(out))
 
 

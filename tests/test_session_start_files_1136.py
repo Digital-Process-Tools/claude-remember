@@ -43,6 +43,7 @@ case "$cmd" in
     render) _remember_render_memory_section ;;
     files) echo "count=${{#MEMORY_FILES[@]}}" ;;
     note) echo "note=$_REMEMBER_SESSION_FILES_NOTE" ;;
+    config_into_x) config_into _v "$2" ""; echo "$_v" ;;
     warn) _remember_session_start_files_warn ;;
     budget)
         eval "_real_render() $(declare -f _remember_render_memory_section | tail -n +2)"
@@ -90,6 +91,12 @@ def _store(tmp_path: Path, config):
         "REMEMBER_CONFIG_CACHE": "0",
     }
     return remember, cfg, env
+
+
+def _call_cfg(cmd: str, env: dict, key: str) -> str:
+    r = subprocess.run([BASH, "-c", HARNESS, "_", cmd, key], env=env,
+                       capture_output=True, text=True, timeout=60, check=False)
+    return r.stdout.strip()
 
 
 def _call(cmd: str, env: dict) -> subprocess.CompletedProcess:
@@ -290,7 +297,7 @@ def test_example_config_flattens_the_same_in_both_flatteners():
         pytest.skip("no jq to compare against")
     jq, py = _flatten_both(REPO_ROOT / "config.example.json")
     assert jq.stdout.rstrip("\n") == py.stdout.rstrip("\n")
-    assert "session_start_files\t[identity core today now recent archive]" in py.stdout
+    assert "session_start_files__arr\t=identity core today now recent archive" in py.stdout
     assert "_comments" not in py.stdout
 
 
@@ -352,10 +359,10 @@ def test_manifest_names_the_deselected_files(tmp_path):
     os.utime(remember / "recent.md", (t + 10, t + 10))
     assert _call("load", env).returncode == 1, "a listed size may now be stale: miss"
 
-def test_a_flatten_cache_from_before_arrays_is_not_served(tmp_path):
-    """A cache written by a build that did not emit array rows has the same
-    file name and the same first two header lines. It must not be served."""
-    remember, _, env = _store(tmp_path, {"session_start_files": ["now"]})
+def test_builds_of_different_ages_keep_their_own_flatten_cache(tmp_path):
+    """The flatten cache name carries a version, so an older build's file is
+    never read by this build and never deleted by it (and the reverse)."""
+    _, _, env = _store(tmp_path, {"session_start_files": ["now"]})
     tmpdir = tmp_path / "tmpdir"
     tmpdir.mkdir()
     env["TMPDIR"] = str(tmpdir)
@@ -363,17 +370,21 @@ def test_a_flatten_cache_from_before_arrays_is_not_served(tmp_path):
     assert _call("files", env).stdout.strip() == "count=1"
     caches = list(tmpdir.glob("remember-config-cache-*"))
     assert len(caches) == 1, "positive control: the flatten cache was published"
-    text = caches[0].read_text()
-    assert "#FLATTEN=" in text
-    old_format = "".join(
-        line for line in text.splitlines(keepends=True)
-        if not line.startswith(("#FLATTEN=", "_RCFG_session_start_files"))
+    assert "-v3-" in caches[0].name
+    # what an older build left in the same TMPDIR: same slug, -v2- name, no array rows
+    old = tmpdir / caches[0].name.replace("-v3-", "-v2-")
+    old_text = "".join(
+        line for line in caches[0].read_text().splitlines(keepends=True)
+        if "session_start_files" not in line
     )
-    caches[0].write_text(old_format)
+    old.write_text(old_text)
     t = time.time() + 30
-    os.utime(caches[0], (t, t))
+    os.utime(old, (t, t))
     assert _call("files", env).stdout.strip() == "count=1"
     assert _note(env) == ""
+    assert old.read_text() == old_text, "this build must not delete or rewrite the older build's file"
+    assert caches[0].exists(), "and its own file survives the older one being there"
+
 
 def _have_jq() -> bool:
     return shutil.which("jq") is not None
@@ -399,6 +410,9 @@ EDGE_DOCS = [
     {"a_b": ["x"], "a": {"b": ["y"]}},
     {"bad-key": ["x"], "ok": ["y"]},
     {"o": {"x": "now"}, "n": None, "t": True},
+    {"a" + chr(10): 1},
+    {"session_start_files": {}, "o": {"p": 1}},
+    {"session_start_files": ["now"], "session": {"start_files": ["core"]}},
 ]
 
 
@@ -413,16 +427,49 @@ def test_flatteners_agree_on_edge_cases(tmp_path, doc):
     assert jq.stdout.rstrip("\n") == py.stdout.rstrip("\n"), doc
 
 
-def test_an_array_never_makes_a_config_newly_refused(tmp_path):
-    """x.y = ["a"] beside x_y = 1 loaded before arrays were carried; it must
-    still load, with the scalar row intact."""
+@pytest.mark.parametrize("doc", [
+    {"x": {"y": ["a"]}, "x_y": 1},
+    {"a": {"b": ["x"]}, "a_b": ["y"]},
+])
+def test_an_array_colliding_with_another_key_is_refused(tmp_path, doc):
+    """The flattener refuses rather than guesses: neither key may silently win."""
     if not _have_jq():
         pytest.skip("no jq")
     cfg = tmp_path / "c.json"
-    cfg.write_text(json.dumps({"x": {"y": ["a"]}, "x_y": 1}), encoding="utf-8")
+    cfg.write_text(json.dumps(doc), encoding="utf-8")
     for out in _flatten_both(cfg):
-        assert "#refuse" not in out.stdout
-        assert "x_y\t1" in out.stdout
+        assert out.stdout.startswith("#refuse two config keys")
+
+
+@pytest.mark.parametrize("doc", [
+    {"session_start_files": ["now"], "session": {"start_files": "today"}},
+    {"session_start_files": ["now"], "session": {"start_files": ["core"]}},
+])
+def test_a_colliding_key_never_overrides_the_list(tmp_path, doc):
+    """The refused table falls back to per-key reads, which answer correctly."""
+    _, _, env = _store(tmp_path, doc)
+    assert _present(_call("render", env).stdout) == ["--- now.md ---"]
+
+
+def test_main_loadable_scalar_keys_still_resolve_when_the_table_is_refused(tmp_path):
+    _, _, env = _store(tmp_path, {"x": {"y": ["a"]}, "x_y": 1})
+    assert _call_cfg("config_into_x", env, ".x_y") == "1"
+
+
+@pytest.mark.parametrize("text", ["[now today]", "[]", "[now]"])
+def test_a_string_that_looks_like_a_list_is_not_one(tmp_path, text):
+    _, _, env = _store(tmp_path, {"session_start_files": text})
+    assert _present(_call("render", env).stdout) == ALL_HEADERS
+    assert _note(env) != ""
+
+
+def test_an_empty_object_and_a_sibling_key_are_told_apart(tmp_path):
+    _, _, env = _store(tmp_path, {"session_start_files": {}})
+    assert _note(env) != ""
+    _, _, env2 = _store(tmp_path / "b", {"session_start_files_extra": 1})
+    assert _note(env2) == "", "a sibling key is not the setting"
+    assert _present(_call("render", env2).stdout) == ALL_HEADERS
+
 
 ODD_SPACES = [chr(0x0C), chr(0x0B), chr(0xA0), chr(0x2003), chr(0x85)]
 
