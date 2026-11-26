@@ -113,25 +113,40 @@ _SAVE_SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
 
 source "$_SAVE_SCRIPT_DIR/resolve-paths.sh"
 
-# #1134: capture the project's git common dir NOW, while PROJECT_DIR is still
-# the checkout it names. The after_save git-backup hook runs detached, and an
-# orchestrator may remove a linked worktree before it fires -- or something
-# re-creates the path as a bare stub -- leaving nothing to ask. The hook compares
-# against this captured value instead of a live lookup that can no longer answer.
-# Empty is a real answer (PROJECT_DIR is not a git checkout) and is told apart
-# from "never captured" by the _SET marker.
-REMEMBER_PROJECT_COMMON_DIR=""
-if [ -d "$PROJECT_DIR" ]; then
-    REMEMBER_PROJECT_COMMON_DIR=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || REMEMBER_PROJECT_COMMON_DIR=""
-fi
-REMEMBER_PROJECT_COMMON_DIR_SET=1
-export REMEMBER_PROJECT_COMMON_DIR REMEMBER_PROJECT_COMMON_DIR_SET
 source "$_SAVE_SCRIPT_DIR/detect-tools.sh"
 source "$_SAVE_SCRIPT_DIR/bootstrap-dirs.sh"
 source "$_SAVE_SCRIPT_DIR/log.sh"
 source "$_SAVE_SCRIPT_DIR/lib-lock.sh"
 source "$_SAVE_SCRIPT_DIR/lib-staging-lock.sh"
+# #1134. A missing file leaves _remember_git_common_dir undefined, which the capture
+# below reads as "could not tell" (state unknown) -- the closed answer, not a crash.
+source "$_SAVE_SCRIPT_DIR/lib-git-common-dir.sh" 2>/dev/null || true
 log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
+
+# #1134: ask NOW, while PROJECT_DIR is still the checkout it names, which git
+# repository the project belongs to, and hand the answer to the after_save hooks.
+# They run detached: an orchestrator may remove a linked worktree before the
+# git-backup hook fires, or something may re-create the path as a bare stub, and
+# a live lookup from there answers "no repository" -- which the hook used to read
+# as "so REPO_ROOT is not the project", and committed the memory into it. Three
+# states, never an empty string standing for two of them:
+#   repo     REMEMBER_PROJECT_COMMON_DIR is the project's git common dir
+#   none     git says PROJECT_DIR is not inside a repository (a real answer)
+#   unknown  the lookup itself failed -- the hook declines rather than guessing
+if REMEMBER_PROJECT_COMMON_DIR=$(_remember_git_common_dir "$PROJECT_DIR"); then
+    REMEMBER_PROJECT_GIT_STATE=repo
+else
+    _project_git_rc=$?
+    REMEMBER_PROJECT_COMMON_DIR=""
+    case $_project_git_rc in
+        3) REMEMBER_PROJECT_GIT_STATE=none ;;
+        *)
+            REMEMBER_PROJECT_GIT_STATE=unknown
+            log "git-backup" "could not determine which git repository PROJECT_DIR ($PROJECT_DIR) belongs to; the backup hook will decline to commit until a save can tell"
+            ;;
+    esac
+fi
+export REMEMBER_PROJECT_COMMON_DIR REMEMBER_PROJECT_GIT_STATE
 
 LOCK_DIR="${REMEMBER_DIR}/tmp/save.lock"
 # How long the backgrounded NDC commit waits for the save lock before giving up
