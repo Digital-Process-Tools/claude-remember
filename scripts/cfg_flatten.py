@@ -25,9 +25,23 @@ def walk(node, prefix, out):
         for k, v in node.items():
             walk(v, prefix + [k], out)
     elif isinstance(node, list):
-        return
+        # #1136: an array is carried as one value (see encode_list); keys
+        # outside the slot alphabet and the documentation-only _comments
+        # block are skipped rather than allowed to trip the refusals below.
+        if prefix and prefix[0] != "_comments" and all(
+            re.match(r"^[A-Za-z0-9_]+$", part) for part in prefix
+        ):
+            out.append((prefix, node))
     else:
         out.append((prefix, node))
+
+
+def encode_list(items) -> str:
+    """Same encoding as cfg_flatten.jq: space-joined plain names, "[]" when
+    empty, "#invalid" for anything else (#1136)."""
+    if any(not isinstance(i, str) or re.search(r"\s", i) for i in items):
+        return "#invalid"
+    return " ".join(items) if items else "[]"
 
 
 def main() -> None:
@@ -56,7 +70,11 @@ def main() -> None:
 
     out = []
     for p, v in rows:
-        out.append(".".join(p) + "\t" + (v if isinstance(v, str) else json.dumps(v)))
+        if isinstance(v, list):
+            text = encode_list(v)
+        else:
+            text = v if isinstance(v, str) else json.dumps(v)
+        out.append(".".join(p) + "\t" + text)
     sys.stdout.write("\n".join(out))
 
 
