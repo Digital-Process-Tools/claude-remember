@@ -11,8 +11,9 @@ asking the scanner to reason about where a shell string ends).
 
 Same contract jq's own one-liner (`_REMEMBER_CFG_FLATTEN_JQ`, log.sh) keeps:
 same refusals, same "haiku" top-level key and documentation-only "_comments"
-block skipped, an array of plain names carried as one bracketed row (#1136), same textual form for
-non-string values -- "true"/"false", never Python's "True"/"False" (the #159
+block skipped, an array of single plain names carried as its own "<key>__arr"
+row and a top-level object marked by a "<key>__obj" row (#1136), same textual
+form for non-string values -- "true"/"false", never Python's "True"/"False" (the #159
 near miss this whole dual-path design exists to avoid repeating).
 """
 
@@ -39,7 +40,7 @@ def encode_list(items) -> str:
     The row itself is named "<key>__arr", so no string value can be mistaken
     for one. Whitespace is exactly space, tab, newline and carriage return --
     the jq side's set."""
-    if any(not isinstance(i, str) or re.search(r"[ \t\n\r]", i) for i in items):
+    if any(not isinstance(i, str) or i == "" or re.search(r"[ \t\n\r]", i) for i in items):
         return "#invalid"
     return "=" + " ".join(items)
 
@@ -60,8 +61,8 @@ def main() -> None:
     ]
     ok = re.compile(r"\A[A-Za-z0-9_]+\Z")
     scalars = [(p, v) for p, v in rows if not isinstance(v, list)]
-    # An array whose key is outside the alphabet is not carried (it never
-    # causes that refusal) but still takes part in the collision refusal.
+    # An array whose key is outside the alphabet is simply not carried: it
+    # never causes that refusal and is not part of the collision check below.
     arrays = [
         (p, v) for p, v in rows if isinstance(v, list) and all(ok.match(part) for part in p)
     ]
@@ -79,7 +80,9 @@ def main() -> None:
             print("#refuse a config key is outside [A-Za-z0-9_]")
             sys.exit(0)
     slots = ["_".join(p) for p, _ in scalars + arrays]
-    if len(set(slots)) != len(slots):
+    # the generated row names own the __arr / __obj suffixes
+    reserved = any(s.endswith(("__arr", "__obj")) for s in slots)
+    if len(set(slots)) != len(slots) or reserved:
         print("#refuse two config keys flatten to the same name")
         sys.exit(0)
     for p, v in scalars:

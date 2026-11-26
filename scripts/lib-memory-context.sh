@@ -182,15 +182,16 @@ _remember_memory_paths() {
 # empty, "#invalid" for any other array), and any top-level object as a
 # "<key>__obj" marker row, so a plain string can never be mistaken for a list.
 # When the flattener declined the config (state not "ok"), the per-key fallback
-# read returns the JSON text instead, held to the same rule: a JSON array of
-# single names only. (There a string whose text is "[]" cannot be told from an
-# empty array.) No jq or python is run here, so SessionStart cache hits, saves
-# and consolidation pay nothing for the key. Never fails the caller, never logs:
+# read is typed by one extra jq call (a JSON string is never read as a list);
+# without jq it returns JSON text, held to the same rule: a JSON array of single
+# names only (there a string whose text is "[]" cannot be told from an empty
+# array). No jq or python is run on the normal path, so SessionStart cache hits,
+# saves and consolidation pay nothing for the key. Never fails the caller, never logs:
 # only the SessionStart hook reports the note (_remember_session_start_files_warn).
 _remember_session_start_files_resolve() {
     local LC_ALL=C
     local _all="identity core today now recent archive"
-    local _val="" _arr="" _obj="" _inner="" _w _n _sel=" " _bad="" _any=0 _noglob=0 _q="" _words="" _isnote=0
+    local _val="" _arr="" _obj="" _inner="" _w _n _sel=" " _bad="" _any=0 _noglob=0 _q="" _words="" _isnote=0 _typed=""
     local _re='^[[:space:]]*("[A-Za-z0-9_-]+"[[:space:]]*(,[[:space:]]*"[A-Za-z0-9_-]+"[[:space:]]*)*)?$'
     local _tail=" - injecting all memory files"
     printf -v _q '\042'
@@ -217,6 +218,23 @@ _remember_session_start_files_resolve() {
             _isnote=1
         else
             _words="$_val"
+        fi
+    elif [ "${JQ:-}" = jq ] && [ -f "${REMEMBER_CONFIG:-}" ]; then
+        # The flattener declined this config (slow path already): ask jq for
+        # the value WITH its type, so a JSON string is never read as a list.
+        _typed=$(_remember_run_jq -r '.session_start_files | if . == null then "" elif type == "array" then (if any(.[]; type != "string" or . == "" or contains(" ") or contains("\t") or contains("\n") or contains("\r")) then "A:#invalid" else "A:" + join(" ") end) elif type == "string" then "S:" + . else "O:" end' "$REMEMBER_CONFIG" 2>/dev/null) || _typed=""
+        if [ -z "$_typed" ] || [ "$_typed" = "S:" ]; then
+            _isnote=1
+        elif [ "$_typed" = "A:#invalid" ] || [ "${_typed:0:2}" = "O:" ]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        elif [ "${_typed:0:2}" = "A:" ]; then
+            _words="${_typed#A:}"
+        elif [[ "$_typed" == *[[:space:]]* ]]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        else
+            _words="${_typed#S:}"
         fi
     elif [ -z "$_val" ]; then
         _isnote=1

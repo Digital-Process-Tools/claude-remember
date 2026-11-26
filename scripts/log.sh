@@ -163,7 +163,6 @@ _REMEMBER_CFG_LOADED_FROM=""
 _REMEMBER_CFG_NAMES=()
 _REMEMBER_CFG_VALUES=()
 
-
 _remember_cfg_table_set() {
     _REMEMBER_CFG_NAMES+=("$1")
     _REMEMBER_CFG_VALUES+=("$2")
@@ -345,16 +344,16 @@ _remember_cfg_flatten_cache_path() {
 # _remember_cfg_flatten_cache_publish below can best-effort remove the
 # orphan an install upgrading from <=0.38.0 left behind.
 _remember_cfg_flatten_cache_path_v1() {
-    local _v2 _dir _base
-    _v2=$(_remember_cfg_flatten_cache_path) || return 1
+    local _live _dir _base
+    _live=$(_remember_cfg_flatten_cache_path) || return 1
     # #972: anchor the substitution to the filename's own -v3- segment, not
     # the first occurrence anywhere in the full path -- a bare substitution
     # over the WHOLE path matches inside ${TMPDIR:-/tmp} itself when that
     # path happens to contain the literal substring -v3- (e.g.
     # TMPDIR=/mnt/build-v3-staging/tmp), producing a v1 path that does not
     # name the real pre-#864 orphan at all.
-    _dir="${_v2%/*}"
-    _base="${_v2##*/}"
+    _dir="${_live%/*}"
+    _base="${_live##*/}"
     printf '%s' "${_dir}/${_base/-v3-/-}"
 }
 
@@ -645,7 +644,6 @@ _remember_cfg_flatten_cache_publish() {
         _remember_cfg_flatten_q_encode _encoded_dir "${REMEMBER_DIR:-}"
         printf '#REMEMBER_DIR=%s\n' "$_encoded_dir"
         printf '#RCFG_EXISTS=%s\n' "$_exists_now"
-
         local _encoded_v
         while IFS=$'\t' read -r _k _v; do
             [ -n "$_k" ] || continue

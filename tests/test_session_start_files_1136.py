@@ -411,6 +411,11 @@ EDGE_DOCS = [
     {"bad-key": ["x"], "ok": ["y"]},
     {"o": {"x": "now"}, "n": None, "t": True},
     {"a" + chr(10): 1},
+    {"session_start_files": [""]},
+    {"session_start_files": ["", "now"]},
+    {"session_start_files": {"_arr": "=identity"}},
+    {"foo": ["a"], "foo__arr": "lit"},
+    {"foo": {"bar": 1}, "foo__obj": "lit"},
     {"session_start_files": {}, "o": {"p": 1}},
     {"session_start_files": ["now"], "session": {"start_files": ["core"]}},
 ]
@@ -507,3 +512,29 @@ def test_flatteners_agree_on_generated_configs(tmp_path):
         jq, py = _flatten_both(cfg)
         assert jq.returncode == py.returncode, doc
         assert jq.stdout.rstrip("\n") == py.stdout.rstrip("\n"), doc
+
+@pytest.mark.parametrize("value", [[""], ["", "now"]])
+def test_an_empty_entry_is_invalid_not_an_empty_list(tmp_path, value):
+    _, _, env = _store(tmp_path, {"session_start_files": value})
+    assert _present(_call("render", env).stdout) == ALL_HEADERS
+    assert _note(env) != ""
+    _, _, env2 = _store(tmp_path / "b", {"session_start_files": value, "bad-key": 1})
+    assert _present(_call("render", env2).stdout) == ALL_HEADERS, "same on the fallback path"
+    assert _note(env2) != ""
+
+
+@pytest.mark.parametrize("text", ["[]", '["now"]', "[now today]"])
+def test_fallback_path_reads_a_string_as_a_string(tmp_path, text):
+    """A config with a hyphenated key or a tab value is declined by the
+    flattener; a JSON string there must not be mistaken for a list."""
+    _, _, env = _store(tmp_path, {"session_start_files": text, "p": "a" + chr(10) + "b"})
+    assert _present(_call("render", env).stdout) == ALL_HEADERS
+    assert _note(env) != ""
+
+
+def test_generated_row_names_cannot_be_forged_by_a_real_key(tmp_path):
+    _, _, env = _store(tmp_path, {"session_start_files": {"_arr": "=identity"}})
+    assert _present(_call("render", env).stdout) == ALL_HEADERS
+    assert _note(env) != ""
+    _, _, env2 = _store(tmp_path / "b", {"foo": ["a"], "foo__arr": "lit"})
+    assert _call_cfg("config_into_x", env2, ".foo__arr") == "lit"

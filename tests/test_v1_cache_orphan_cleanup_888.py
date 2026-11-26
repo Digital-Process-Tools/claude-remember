@@ -143,5 +143,5 @@ echo "V2=$(_remember_cfg_flatten_cache_path)"
     assert v1 and v2, f"could not read both paths back: {result.stdout!r}"
     assert v1 != v2, "v1 and v2 cache paths must not collide"
     assert v2 == v1.replace(
-        "remember-config-cache-", "remember-config-cache-v2-", 1
-    ), f"v1/v2 paths differ by more than the -v2- segment: v1={v1!r} v2={v2!r}"
+        "remember-config-cache-", "remember-config-cache-v3-", 1
+    ), f"v1/v3 paths differ by more than the -v3- segment: v1={v1!r} v2={v2!r}"
