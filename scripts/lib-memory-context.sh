@@ -197,7 +197,25 @@ _remember_session_start_files_resolve() {
     printf -v _q '\042'
     _REMEMBER_SESSION_FILES_SEL="$_all"
     _REMEMBER_SESSION_FILES_NOTE=""
-    config_into _val ".session_start_files" ""
+    local _usetyped=0
+    # Load the table first (config_into would, lazily) so a refused config does
+    # not also pay config_into's own per-key read before the typed one below.
+    if type _config_load >/dev/null 2>&1; then
+        if [ -z "${_REMEMBER_CFG_STATE:-}" ] || [ "${_REMEMBER_CFG_LOADED_FROM:-}" != "${REMEMBER_CONFIG:-}" ]; then
+            _config_load
+        fi
+    fi
+    if [ "${_REMEMBER_CFG_STATE:-}" != "ok" ] && [ "${JQ:-}" = jq ] && [ -f "${REMEMBER_CONFIG:-}" ]; then
+        # The flattener declined this config (slow path already): ask jq for
+        # the value WITH its type, so a JSON string is never read as a list.
+        # A failed call leaves _usetyped at 0 and falls through to the text read.
+        if _typed=$(_remember_run_jq -r '.session_start_files | if . == null then "" elif type == "array" then (if any(.[]; type != "string" or . == "" or contains(" ") or contains("\t") or contains("\n") or contains("\r")) then "A:#invalid" else "A:" + join(" ") end) elif type == "string" then "S:" + . else "O:" end' "$REMEMBER_CONFIG" 2>/dev/null); then
+            _usetyped=1
+        fi
+    fi
+    if [ "$_usetyped" = 0 ]; then
+        config_into _val ".session_start_files" ""
+    fi
     if [ "${_REMEMBER_CFG_STATE:-}" = "ok" ]; then
         config_into _arr ".session_start_files__arr" ""
         config_into _obj ".session_start_files__obj" ""
@@ -219,10 +237,7 @@ _remember_session_start_files_resolve() {
         else
             _words="$_val"
         fi
-    elif [ "${JQ:-}" = jq ] && [ -f "${REMEMBER_CONFIG:-}" ]; then
-        # The flattener declined this config (slow path already): ask jq for
-        # the value WITH its type, so a JSON string is never read as a list.
-        _typed=$(_remember_run_jq -r '.session_start_files | if . == null then "" elif type == "array" then (if any(.[]; type != "string" or . == "" or contains(" ") or contains("\t") or contains("\n") or contains("\r")) then "A:#invalid" else "A:" + join(" ") end) elif type == "string" then "S:" + . else "O:" end' "$REMEMBER_CONFIG" 2>/dev/null) || _typed=""
+    elif [ "$_usetyped" = 1 ]; then
         if [ -z "$_typed" ] || [ "$_typed" = "S:" ]; then
             _isnote=1
         elif [ "$_typed" = "A:#invalid" ] || [ "${_typed:0:2}" = "O:" ]; then
@@ -1104,10 +1119,10 @@ _remember_render_memory_section() {
     # #1136: rotated slices belong to archive.md / recent.md, so they are only
     # listed while those files are selected.
     local _remember_rot_archive=() _remember_rot_recent=()
-    if [[ " ${_REMEMBER_SESSION_FILES_SEL:-} " == *" archive "* ]]; then
+    if [[ " ${_REMEMBER_SESSION_FILES_SEL-identity core today now recent archive} " == *" archive "* ]]; then
         _remember_rot_archive=("$_remember_rotated_glob_dir"/archive-*.md)
     fi
-    if [[ " ${_REMEMBER_SESSION_FILES_SEL:-} " == *" recent "* ]]; then
+    if [[ " ${_REMEMBER_SESSION_FILES_SEL-identity core today now recent archive} " == *" recent "* ]]; then
         _remember_rot_recent=("$_remember_rotated_glob_dir"/recent-*.md)
     fi
     _remember_rotated_arr=(${_remember_rot_archive[@]+"${_remember_rot_archive[@]}"} ${_remember_rot_recent[@]+"${_remember_rot_recent[@]}"})

@@ -80,10 +80,12 @@ def main() -> None:
             print("#refuse a config key is outside [A-Za-z0-9_]")
             sys.exit(0)
     slots = ["_".join(p) for p, _ in scalars + arrays]
-    # the generated row names own the __arr / __obj suffixes
-    reserved = any(s.endswith(("__arr", "__obj")) for s in slots)
-    if len(set(slots)) != len(slots) or reserved:
+    if len(set(slots)) != len(slots):
         print("#refuse two config keys flatten to the same name")
+        sys.exit(0)
+    # the generated row names own the __arr / __obj suffixes
+    if any(s.endswith(("__arr", "__obj")) for s in slots):
+        print("#refuse a config key ends in a reserved suffix (__arr or __obj)")
         sys.exit(0)
     for p, v in scalars:
         if isinstance(v, str) and ("\t" in v or "\n" in v):

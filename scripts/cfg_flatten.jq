@@ -17,11 +17,12 @@ def okname: test("\\A[A-Za-z0-9_]+\\z");
    | .key] as $objs
 | if (($scal | flatten) | any(okname | not)) then
     "#refuse a config key is outside [A-Za-z0-9_]"
-  elif (((($scal + $arrs) | map(join("_"))) as $names
-         | (($names | unique | length) != ($names | length))
-           # the generated row names own the __arr / __obj suffixes
-           or any($names[]; endswith("__arr") or endswith("__obj")))) then
+  elif ((($scal + $arrs) | map(join("_"))) as $names
+        | ($names | unique | length) != ($names | length)) then
     "#refuse two config keys flatten to the same name"
+  # the generated row names own the __arr / __obj suffixes
+  elif ((($scal + $arrs) | map(join("_"))) | any(endswith("__arr") or endswith("__obj"))) then
+    "#refuse a config key ends in a reserved suffix (__arr or __obj)"
   elif ([$scal[] as $p | $doc | getpath($p) | select(type == "string" and test("[\t\n]"))] | length) > 0 then
     "#refuse a config value contains a tab or a newline"
   else
