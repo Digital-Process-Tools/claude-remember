@@ -57,7 +57,11 @@ _remember_is_windows() {
 #
 # Launches CMD... detached with stdout+stderr appended to OUTFILE (use
 # /dev/null to discard) and stdin from /dev/null, via a hidden wscript.exe
-# launcher so Windows Terminal never allocates a console for it. Returns 1
+# launcher so Windows Terminal never allocates a console for it. (#1132: MSYS
+# rewrites a literal /dev/null argument to "nul" before it reaches
+# wscript.exe, so a /dev/null OUTFILE or PIDFILE is handed over as an EMPTY
+# string instead -- never converted -- which lib-detach-pidwrap.sh reads as
+# "skip this step"; no file named nul is created.) Returns 1
 # (do nothing further -- caller falls back to its own nohup line) whenever
 # the hidden route cannot be set up: wscript.exe or cygpath missing, or the
 # shipped VBS/pidwrap assets are not where this file expects them.
@@ -310,6 +314,13 @@ _remember_detach_windows_impl() {
     outfile="$1"
     pidfile="$2"
     shift 2
+
+    # #1132: MSYS rewrites a literal /dev/null argument to "nul" on its way
+    # into wscript.exe, and lib-detach-pidwrap.sh then created a real file
+    # called nul. An empty argument is never converted (and the VBS QuoteArg
+    # passes it through as ""), and pidwrap treats empty as skip.
+    [ "$outfile" = "/dev/null" ] && outfile=""
+    [ "$pidfile" = "/dev/null" ] && pidfile=""
 
     local lib_dir
     lib_dir="${BASH_SOURCE[0]%/*}"

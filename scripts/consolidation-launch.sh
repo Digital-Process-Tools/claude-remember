@@ -39,7 +39,15 @@ _lib_dir="${BASH_SOURCE[0]%/*}"
 source "$_lib_dir/lib-detach.sh"
 
 _detach_rc=1
-_remember_is_windows && { _remember_detach_windows /dev/null /dev/null "$@"; _detach_rc=$?; }
+if _remember_is_windows; then
+    # #1132: earlier versions left a regular file named `nul` (the PID plus
+    # all consolidation output) in the project dir, which Explorer/cmd cannot
+    # delete. Clean it up here, MSYS only; the common path is one [ -f ] test.
+    if [ -f ./nul ] && rm -f ./nul 2>/dev/null; then
+        echo "[remember] removed stray ./nul file left by an earlier version (#1132)" >&2
+    fi
+    _remember_detach_windows /dev/null /dev/null "$@"; _detach_rc=$?
+fi
 if [ "$_detach_rc" -ne 0 ]; then
     nohup "$@" </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
