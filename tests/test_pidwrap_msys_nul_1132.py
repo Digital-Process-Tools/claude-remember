@@ -64,7 +64,8 @@ def test_nul_is_a_legit_filename_off_windows(tmp_path):
     r = _pidwrap(tmp_path, str(out), "/dev/null")
     assert r.returncode == 0, r.stderr
     assert "hi" in out.read_text()
-    _pidwrap(tmp_path / ".", "/dev/null", "nul")
+    r = _pidwrap(tmp_path, "/dev/null", "nul")
+    assert r.returncode == 0, r.stderr
     assert (tmp_path / "nul").read_text().strip().isdigit()
 
 

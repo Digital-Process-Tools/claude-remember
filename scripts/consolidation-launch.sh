@@ -44,7 +44,7 @@ if _remember_is_windows; then
     # all consolidation output) in the project dir, which Explorer/cmd cannot
     # delete. Clean it up here, MSYS only; the common path is one [ -f ] test.
     if [ -f ./nul ] && rm -f ./nul 2>/dev/null; then
-        echo "[remember] removed stray ./nul file left by an earlier version (#1132)" >&2
+        echo "[remember] removed stray 'nul' file (reserved Windows name, #1132)" >&2
     fi
     _remember_detach_windows /dev/null /dev/null "$@"; _detach_rc=$?
 fi
