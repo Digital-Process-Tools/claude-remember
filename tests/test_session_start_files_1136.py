@@ -538,3 +538,27 @@ def test_generated_row_names_cannot_be_forged_by_a_real_key(tmp_path):
     assert _note(env) != ""
     _, _, env2 = _store(tmp_path / "b", {"foo": ["a"], "foo__arr": "lit"})
     assert _call_cfg("config_into_x", env2, ".foo__arr") == "lit"
+
+def _failing_typed_jq_shim(base: Path, env: dict) -> None:
+    """A jq that fails only for the typed read of session_start_files."""
+    real = shutil.which("jq")
+    if not real:
+        pytest.skip("no jq to wrap")
+    shim_dir = base / "failshim"
+    shim_dir.mkdir()
+    shim = shim_dir / "jq"
+    shim.write_text('#!/bin/sh\ncase "$*" in *"session_start_files |"*) exit 5 ;; esac\nexec "%s" "$@"\n' % real)
+    shim.chmod(0o755)
+    env["PATH"] = str(shim_dir) + os.pathsep + env["PATH"]
+
+
+@pytest.mark.parametrize("value", [["now"], "[]"])
+def test_a_failed_typed_read_injects_all_six_with_a_warning(tmp_path, value):
+    cfg = {"bad-key": 1, "session_start_files": value}
+    _, _, env = _store(tmp_path / "ok", cfg)
+    if value == ["now"]:  # positive control: the same config is read fine
+        assert _present(_call("render", env).stdout) == ["--- now.md ---"]
+    _, _, env2 = _store(tmp_path / "fail", cfg)
+    _failing_typed_jq_shim(tmp_path / "fail", env2)
+    assert _present(_call("render", env2).stdout) == ALL_HEADERS
+    assert "could not be read" in _note(env2)

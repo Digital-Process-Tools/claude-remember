@@ -176,14 +176,14 @@ _remember_memory_paths() {
 #   []                               -> none (an explicit choice, honoured)
 #   anything else, or only unknown   -> all six, with a warning note: a typo
 #                                       must never silently blank the memory
-# The value comes through config_into like every other key. The shared
+# On the normal path the value comes through config_into. The shared
 # flattener (cfg_flatten.jq / .py) carries an array of single plain names as its
 # own row, "<key>__arr" = "=" followed by the space-joined names ("=" alone when
 # empty, "#invalid" for any other array), and any top-level object as a
 # "<key>__obj" marker row, so a plain string can never be mistaken for a list.
 # When the flattener declined the config (state not "ok"), the per-key fallback
-# read is typed by one extra jq call (a JSON string is never read as a list);
-# without jq it returns JSON text, held to the same rule: a JSON array of single
+# read is typed by one jq call; if that call fails, all six are injected with a
+# note, never a guess. Without jq the per-key read returns JSON text, held to the same rule: a JSON array of single
 # names only (there a string whose text is "[]" cannot be told from an empty
 # array). No jq or python is run on the normal path, so SessionStart cache hits,
 # saves and consolidation pay nothing for the key. Never fails the caller, never logs:
@@ -200,15 +200,14 @@ _remember_session_start_files_resolve() {
     local _usetyped=0
     # Load the table first (config_into would, lazily) so a refused config does
     # not also pay config_into's own per-key read before the typed one below.
-    if type _config_load >/dev/null 2>&1; then
-        if [ -z "${_REMEMBER_CFG_STATE:-}" ] || [ "${_REMEMBER_CFG_LOADED_FROM:-}" != "${REMEMBER_CONFIG:-}" ]; then
-            _config_load
-        fi
+    if [ -z "${_REMEMBER_CFG_STATE:-}" ] || [ "${_REMEMBER_CFG_LOADED_FROM:-}" != "${REMEMBER_CONFIG:-}" ]; then
+        _config_load
     fi
     if [ "${_REMEMBER_CFG_STATE:-}" != "ok" ] && [ "${JQ:-}" = jq ] && [ -f "${REMEMBER_CONFIG:-}" ]; then
         # The flattener declined this config (slow path already): ask jq for
-        # the value WITH its type, so a JSON string is never read as a list.
-        # A failed call leaves _usetyped at 0 and falls through to the text read.
+        # the value WITH its type (config_into cannot tell a string from a list).
+        # A failed call (_usetyped 2) is never guessed at: all six, with a note.
+        _usetyped=2
         if _typed=$(_remember_run_jq -r '.session_start_files | if . == null then "" elif type == "array" then (if any(.[]; type != "string" or . == "" or contains(" ") or contains("\t") or contains("\n") or contains("\r")) then "A:#invalid" else "A:" + join(" ") end) elif type == "string" then "S:" + . else "O:" end' "$REMEMBER_CONFIG" 2>/dev/null); then
             _usetyped=1
         fi
@@ -237,6 +236,9 @@ _remember_session_start_files_resolve() {
         else
             _words="$_val"
         fi
+    elif [ "$_usetyped" = 2 ]; then
+        _REMEMBER_SESSION_FILES_NOTE="session_start_files could not be read${_tail}"
+        _isnote=1
     elif [ "$_usetyped" = 1 ]; then
         if [ -z "$_typed" ] || [ "$_typed" = "S:" ]; then
             _isnote=1
