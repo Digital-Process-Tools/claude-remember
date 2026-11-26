@@ -188,8 +188,9 @@ _remember_memory_paths() {
 _remember_session_start_files_resolve() {
     local LC_ALL=C
     local _all="identity core today now recent archive"
-    local _val="" _inner="" _w _n _sel=" " _bad="" _any=0 _noglob=0 _q='"' _words="" _isnote=0
+    local _val="" _inner="" _w _n _sel=" " _bad="" _any=0 _noglob=0 _q="" _words="" _isnote=0
     local _re='^[[:space:]]*("[A-Za-z0-9_-]+"[[:space:]]*(,[[:space:]]*"[A-Za-z0-9_-]+"[[:space:]]*)*)?$'
+    printf -v _q '\042'
     _REMEMBER_SESSION_FILES_SEL="$_all"
     _REMEMBER_SESSION_FILES_NOTE=""
     config_into _val ".session_start_files" ""
