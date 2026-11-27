@@ -59,9 +59,16 @@ def _env(home: Path, project: Path, remember: Path, plugin_root: Path) -> dict:
     }
 
 
-def _plugin_root_with_slow_recording_stub(tmp_path: Path, record: Path, *, sleep_seconds: float) -> Path:
+def _plugin_root_with_slow_recording_stub(tmp_path: Path, record: Path, *, release: Path | None = None) -> Path:
     """A plugin root identical to the real one except that save-session.sh
-    records its own invocation and then SLEEPS before exiting -- same
+    records its own invocation and then BLOCKS until the `release` file exists
+    (no `release` -> exits at once). Blocking on a sentinel instead of `sleep N`
+    keeps the save "in flight" exactly as long as the test needs, however slow
+    the runner is: a wall-clock sleep raced the test's own 5 foreground hook
+    runs on slow macOS runners, and once the sleep elapsed the first deferred
+    phase legitimately exited and a later resume legitimately forced a second
+    save (the flake this replaces). The loop is capped (600 x 0.1s) so a test
+    that dies never leaves the stub spinning. Same
     symlink-the-rest-of-the-tree shape as
     test_recovery_transcript_leak_407.py's own
     _plugin_root_with_env_recording_stub, for the same reason: every OTHER
@@ -80,15 +87,39 @@ def _plugin_root_with_slow_recording_stub(tmp_path: Path, record: Path, *, sleep
             continue
         (scripts / entry.name).symlink_to(entry)
     stub = scripts / "save-session.sh"
-    stub.write_text(
-        "#!/bin/bash\n"
-        f'printf "%s\n" "$*" >> "{record}"\n'
-        f"sleep {sleep_seconds}\n"
-        "exit 0\n",
-        encoding="utf-8",
-    )
+    body = "#!/bin/bash\n" + f'printf "%s\n" "$*" >> "{record}"\n'
+    if release is not None:
+        body += (
+            "_i=0\n"
+            f'while [ ! -f "{release}" ] && [ "$_i" -lt 600 ]; do sleep 0.1; _i=$((_i+1)); done\n'
+        )
+    body += "exit 0\n"
+    stub.write_text(body, encoding="utf-8")
     stub.chmod(0o755)
     return root
+
+
+def _wait_for(predicate, timeout: float = 30.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return predicate()
+
+
+def _resume(root: Path, env: dict, payload: str) -> None:
+    # A foreground hook that waited on the (blocked) save would never return:
+    # the timeout turns that into a loud failure, not a hang.
+    result = subprocess.run(
+        ["bash", str(root / "scripts" / "session-start-hook.sh")],
+        env=env, input=payload, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def _calls(record: Path) -> list:
+    return record.read_text().strip().splitlines() if record.exists() else []
 
 
 def _startup_project(tmp_path: Path):
@@ -134,43 +165,57 @@ def _payload(session_id: str, transcript_path: str, source: str = "resume") -> s
 def test_rapid_resume_starts_for_one_session_produce_at_most_one_forced_save_in_flight(tmp_path):
     home, project, remember, current = _startup_project(tmp_path)
     record = tmp_path / "save-calls.txt"
-    stub_sleep = 2.0
-    root = _plugin_root_with_slow_recording_stub(tmp_path, record, sleep_seconds=stub_sleep)
+    release = tmp_path / "release-save"
+    root = _plugin_root_with_slow_recording_stub(tmp_path, record, release=release)
     env = _env(home, project, remember, root)
-
     payload = _payload(CURRENT, transcript_path=str(current), source="resume")
-    durations = []
-    for _ in range(5):
-        start = time.monotonic()
-        result = subprocess.run(
-            ["bash", str(root / "scripts" / "session-start-hook.sh")],
-            env=env, input=payload, capture_output=True, text=True, timeout=60, check=False,
+
+    try:
+        _resume(root, env, payload)
+        # The first recovery save is now genuinely in flight (blocked on the
+        # sentinel, so it stays in flight however slow this runner is).
+        assert _wait_for(record.exists), "the first resume never reached the save stub"
+        for _ in range(4):
+            _resume(root, env, payload)
+        # Every later resume has returned (and SessionStart's foreground never
+        # waited on the blocked save, or _resume's timeout would have fired).
+        # Give any wrongly-launched second deferred phase time to reach the
+        # stub, then count.
+        time.sleep(1.0)
+        calls = _calls(record)
+        assert len(calls) == 1, (
+            f"{len(calls)} forced saves ran for ONE session's repeated rapid "
+            f"resume while the first was still in flight -- the deferred-phase "
+            f"PID marker did not stay alive for the whole recovery: {calls!r}"
         )
-        durations.append(time.monotonic() - start)
-        assert result.returncode == 0, result.stderr
-        time.sleep(0.2)
+    finally:
+        release.write_text("", encoding="utf-8")
 
-    # SessionStart's own FOREGROUND latency must stay unchanged -- this fix
-    # moves where the recovery save WAITS (inside the already-backgrounded
-    # deferred phase), never makes the foreground hook itself wait on it.
-    slow = [d for d in durations if d >= stub_sleep]
-    assert not slow, (
-        f"a SessionStart call took as long as the stub's own sleep "
-        f"({stub_sleep}s) -- the foreground hook is blocking on the "
-        f"recovery save instead of backgrounding it: {durations!r}"
+
+def test_negative_control_a_resume_after_the_first_recovery_finished_forces_again(tmp_path):
+    """Paired with the test above, the other half of the invariant: the marker
+    guards only while the first recovery is IN FLIGHT. Once it has finished
+    (the stub never marks PREV saved) a later resume legitimately forces
+    again -- so the "exactly one" above is the marker working, not recovery
+    being unable to fire twice. This is also what the old sleep-based test hit
+    on a slow runner: a legitimate second save, misread as stacking.
+    """
+    home, project, remember, current = _startup_project(tmp_path)
+    record = tmp_path / "save-calls-twice.txt"
+    root = _plugin_root_with_slow_recording_stub(tmp_path, record)
+    env = _env(home, project, remember, root)
+    payload = _payload(CURRENT, transcript_path=str(current), source="resume")
+
+    _resume(root, env, payload)
+    assert _wait_for(lambda: len(_calls(record)) >= 1), "first resume never forced a save"
+    marker = remember / "tmp" / f"deferred-{CURRENT}.pid"
+    assert _wait_for(lambda: not marker.exists()), "first deferred phase never finished"
+    _resume(root, env, payload)
+    assert _wait_for(lambda: len(_calls(record)) >= 2), (
+        "a resume after the first recovery finished did not force again: "
+        f"{_calls(record)!r}"
     )
 
-    # Give the (at most one) backgrounded recovery save time to finish.
-    deadline = time.time() + stub_sleep + 10
-    while time.time() < deadline:
-        time.sleep(0.2)
-
-    calls = record.read_text().strip().splitlines() if record.exists() else []
-    assert len(calls) <= 1, (
-        f"{len(calls)} forced saves ran for ONE session's repeated rapid "
-        f"resume while the first was still in flight -- the deferred-phase "
-        f"PID marker did not stay alive for the whole recovery: {calls!r}"
-    )
 
 
 def test_a_positive_control_a_single_resume_does_force_save_the_unsaved_previous_session(tmp_path):
@@ -179,7 +224,7 @@ def test_a_positive_control_a_single_resume_does_force_save_the_unsaved_previous
     """
     home, project, remember, current = _startup_project(tmp_path)
     record = tmp_path / "save-calls-single.txt"
-    root = _plugin_root_with_slow_recording_stub(tmp_path, record, sleep_seconds=0)
+    root = _plugin_root_with_slow_recording_stub(tmp_path, record)
     env = _env(home, project, remember, root)
 
     payload = _payload(CURRENT, transcript_path=str(current), source="resume")
