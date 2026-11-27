@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.46.0] - 2026-11-27 — Pick which memory files load at start, and the save-lock change is rolled back
+## [0.46.0] - 2026-11-28 — Pick which memory files load at start, and the save-lock change is rolled back
 
 ### Added
 
@@ -71,6 +71,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session starts (#1132).
 
 - Fixed: the git backup could commit and push your `.remember/` notes into the project's own repository when the project's temporary working copy had been removed, or replaced by an empty folder, by the time the background backup ran. Each save now notes which repository the project belongs to before the backup starts, and the backup uses that answer; if it cannot tell, it skips the run and says so in the log, while a separate backup repository still gets backed up as before. (#1134)
+
+- Fixed: the test `tests/test_recovery_save_stacking_1086.py` failed intermittently on slow macOS CI runners because its stand-in save slept a fixed 2 seconds that the test's own repeated resumes could outlast, so a legitimate second recovery save was misread as stacking; the stand-in now blocks until the test releases it (#1143).
 
 ## [0.45.1] - 2026-11-07 — A stuck save lock now recovers safely instead of blocking every future save
 
