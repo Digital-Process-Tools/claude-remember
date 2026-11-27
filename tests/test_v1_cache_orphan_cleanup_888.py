@@ -1,6 +1,6 @@
 """
 #888: #864 bumped the config-flatten cache's on-disk name to
-`remember-config-cache-v2-<key>` (so an old-format cache is never opened),
+`remember-config-cache-v2-<key>` (now `-v3-`, #1136; so an old-format cache is never opened),
 but nothing ever removed the file an older build wrote under the OLD name
 (`remember-config-cache-<key>`). An install upgrading across #864 kept that
 orphan in `$TMPDIR` forever, and README's own disclosure (#857) still named
@@ -116,11 +116,11 @@ _remember_cfg_flatten_cache_publish $'name\tvalue'
 
 
 def test_v1_path_differs_from_v2_only_by_the_v2_segment(tmp_path):
-    """Sanity check on the two path functions themselves: v1 and v2 must
-    name two different files for the same REMEMBER_DIR, and the only
-    difference must be the `-v2-` segment -- otherwise the cleanup above
-    could silently target (and delete) the live v2 cache instead of the
-    orphan."""
+    """Sanity check on the two path functions themselves: v1 and the live
+    path must name two different files for the same REMEMBER_DIR, and the
+    only difference must be the version segment (`-v3-` since #1136) --
+    otherwise the cleanup above could silently target (and delete) the live
+    cache instead of the orphan."""
     remember_dir = tmp_path / "project" / ".remember"
     remember_dir.mkdir(parents=True)
     script = f"""
@@ -143,5 +143,5 @@ echo "V2=$(_remember_cfg_flatten_cache_path)"
     assert v1 and v2, f"could not read both paths back: {result.stdout!r}"
     assert v1 != v2, "v1 and v2 cache paths must not collide"
     assert v2 == v1.replace(
-        "remember-config-cache-", "remember-config-cache-v2-", 1
-    ), f"v1/v2 paths differ by more than the -v2- segment: v1={v1!r} v2={v2!r}"
+        "remember-config-cache-", "remember-config-cache-v3-", 1
+    ), f"v1/v3 paths differ by more than the -v3- segment: v1={v1!r} v2={v2!r}"

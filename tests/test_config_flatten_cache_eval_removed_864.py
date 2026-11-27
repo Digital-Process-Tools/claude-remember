@@ -488,6 +488,7 @@ _remember_cfg_flatten_cache_path
         env={**os.environ, "PROJECT_DIR": str(tmp_path)},
     )
     assert result.returncode == 0, f"harness itself failed: {result.stderr!r}"
-    assert "remember-config-cache-v2-" in result.stdout, (
-        f"cache path was not bumped to the v2 scheme: {result.stdout!r}"
+    # v2 (#864) and every later version (v3: #1136) satisfy "not the old name"
+    assert "remember-config-cache-v3-" in result.stdout, (
+        f"cache path was not bumped past the v2 scheme: {result.stdout!r}"
     )

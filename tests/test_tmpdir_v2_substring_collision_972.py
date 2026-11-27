@@ -76,23 +76,24 @@ def _assert_v1_anchored_to_basename(v1: str, v2: str) -> None:
         f"substitution must never touch TMPDIR's own text: "
         f"v1_dir={v1_dir!r} v2_dir={v2_dir!r}"
     )
-    assert v1_base == v2_base.replace("-v2-", "-", 1), (
-        "v1 basename must differ from v2's basename only by the -v2- "
+    assert v1_base == v2_base.replace("-v3-", "-", 1), (
+        "v1 basename must differ from the live basename only by the -v3- "
         f"segment: v1_base={v1_base!r} v2_base={v2_base!r}"
     )
 
 
 def test_v1_path_not_confused_by_v2_substring_in_tmpdir(tmp_path):
     """The actual bug: TMPDIR itself contains the literal substring
-    `-v2-` before the filename's own -v2- segment is ever reached."""
-    sys_tmp = tmp_path / "build-v2-staging"
+    `-v3-` (the live version segment) before the filename's own segment is
+    ever reached."""
+    sys_tmp = tmp_path / "build-v3-staging"
     sys_tmp.mkdir(parents=True)
     v1, v2 = _v1_v2_paths(tmp_path, sys_tmp)
     _assert_v1_anchored_to_basename(v1, v2)
 
 
 def test_v1_path_still_correct_with_unrelated_tmpdir(tmp_path):
-    """Positive control: same assertions, ordinary TMPDIR with no -v2-
+    """Positive control: same assertions, ordinary TMPDIR with no -v3-
     substring anywhere in it."""
     sys_tmp = tmp_path / "systmp"
     sys_tmp.mkdir(parents=True)

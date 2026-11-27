@@ -752,6 +752,9 @@ fi
 # this exact logic is how the live path and the cache it feeds silently
 # drift apart. TODAY is already set above, so the function reuses it as-is.
 _remember_memory_paths
+# #1136: report an unusable session_start_files value here, on the SessionStart
+# path only -- saves and consolidation resolve it too and must not repeat it.
+_remember_session_start_files_warn
 
 # ── Handoff path: single (default) vs per-session (#363) ──────────────────
 # Two or more INTERACTIVE sessions share one project store by design, even

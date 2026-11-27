@@ -77,7 +77,9 @@ def _keys_read_by_the_code() -> set[str]:
     for path in _source_files():
         text = path.read_text(encoding="utf-8")
         keys |= set(_CONFIG_CALL.findall(text))
-    return keys
+    # #1136: the flattener carries an array as "<key>__arr" and marks a
+    # top-level object as "<key>__obj"; both are the documented <key> itself.
+    return {re.sub(r"__(arr|obj)$", "", k) for k in keys}
 
 
 @pytest.mark.parametrize("key", ["haiku.strip_session_env", "haiku.codex_env_allow"])

@@ -28,7 +28,9 @@
 # CACHE VALIDATION
 #   `$REMEMBER_DIR/tmp/start-context.cache` (raw bytes to inject) plus
 #   `$REMEMBER_DIR/tmp/start-context.manifest` (one `SRC=<path>` line per
-#   input the render depends on: the six memory files, REMEMBER_DIR itself --
+#   input the render depends on: the memory files session_start_files selects
+#   (all six by default; the selection itself is recorded as an SFILES= line,
+#   #1136), REMEMBER_DIR itself --
 #   so a rotated slice appearing or disappearing invalidates the cache even if
 #   whatever created it forgot to republish -- and the three config layers,
 #   since MEMORY_INJECT_MAX_BYTES is read from config()).
@@ -134,7 +136,186 @@ _remember_memory_paths() {
     REMEMBER_NOW="$REMEMBER_DIR/now.md"
     REMEMBER_TODAY_FILE="$REMEMBER_DIR/today-${TODAY}.md"
 
-    MEMORY_FILES=("$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE")
+    # #1136: session_start_files picks which of the six are injected. The
+    # array keeps the canonical order whatever order the config lists them in;
+    # the files left out are remembered so the render can point at them.
+    _remember_session_start_files_resolve
+    MEMORY_FILES=()
+    _REMEMBER_DESELECTED=""
+    local _msf_n _msf_p
+    for _msf_n in identity core today now recent archive; do
+        if [ "$_msf_n" = identity ]; then
+            _msf_p="$IDENTITY_FILE"
+        elif [ "$_msf_n" = core ]; then
+            _msf_p="$CORE_MEMORIES"
+        elif [ "$_msf_n" = today ]; then
+            _msf_p="$REMEMBER_TODAY_FILE"
+        elif [ "$_msf_n" = now ]; then
+            _msf_p="$REMEMBER_NOW"
+        elif [ "$_msf_n" = recent ]; then
+            _msf_p="$REMEMBER_RECENT"
+        else
+            _msf_p="$REMEMBER_ARCHIVE"
+        fi
+        if [[ " $_REMEMBER_SESSION_FILES_SEL " == *" $_msf_n "* ]]; then
+            MEMORY_FILES+=("$_msf_p")
+        else
+            _REMEMBER_DESELECTED="${_REMEMBER_DESELECTED}${_msf_p}"$'\n'
+        fi
+    done
+}
+
+# _remember_session_start_files_resolve (#1136)
+# Sets _REMEMBER_SESSION_FILES_SEL to the space-separated names (identity core
+# today now recent archive) SessionStart should inject, _REMEMBER_SESSION_FILES_CSV
+# to the same set as a comma list ("none" for the empty set) -- the form the
+# #668 cache manifest records -- and _REMEMBER_SESSION_FILES_NOTE to a warning
+# text when the config value had to be ignored (empty when it was fine).
+#   key absent                       -> all six (the pre-1136 behaviour)
+#   list of plain names / one name   -> exactly those, unknown names ignored
+#   []                               -> none (an explicit choice, honoured)
+#   anything else, or only unknown   -> all six, with a warning note: a typo
+#                                       must never silently blank the memory
+# On the normal path the value comes through config_into. The shared
+# flattener (cfg_flatten.jq / .py) carries an array of single plain names as its
+# own row, "<key>__arr" = "=" followed by the space-joined names ("=" alone when
+# empty, "#invalid" for any other array), and any top-level object as a
+# "<key>__obj" marker row, so a plain string can never be mistaken for a list.
+# When the flattener declined the config (state not "ok"), the per-key fallback
+# read is typed by one jq call; if that call fails, all six are injected with a
+# note, never a guess. Without jq the per-key read returns JSON text, held to the same rule: a JSON array of single
+# names only (there a string whose text is "[]" cannot be told from an empty
+# array). No jq or python is run on the normal path, so SessionStart cache hits,
+# saves and consolidation pay nothing for the key. Never fails the caller, never logs:
+# only the SessionStart hook reports the note (_remember_session_start_files_warn).
+_remember_session_start_files_resolve() {
+    local LC_ALL=C
+    local _all="identity core today now recent archive"
+    local _val="" _arr="" _obj="" _inner="" _w _n _sel=" " _bad="" _any=0 _noglob=0 _q="" _words="" _isnote=0 _typed=""
+    local _re='^[[:space:]]*("[A-Za-z0-9_-]+"[[:space:]]*(,[[:space:]]*"[A-Za-z0-9_-]+"[[:space:]]*)*)?$'
+    local _tail=" - injecting all memory files"
+    printf -v _q '\042'
+    _REMEMBER_SESSION_FILES_SEL="$_all"
+    _REMEMBER_SESSION_FILES_NOTE=""
+    local _usetyped=0
+    # Load the table first (config_into would, lazily) so a refused config does
+    # not also pay config_into's own per-key read before the typed one below.
+    # Harnesses that source this file with a stubbed config() have no table.
+    if type _config_load >/dev/null 2>&1; then
+        if [ -z "${_REMEMBER_CFG_STATE:-}" ] || [ "${_REMEMBER_CFG_LOADED_FROM:-}" != "${REMEMBER_CONFIG:-}" ]; then
+            _config_load
+        fi
+    fi
+    if [ "${_REMEMBER_CFG_STATE:-}" != "ok" ] && [ "${JQ:-}" = jq ] && [ -f "${REMEMBER_CONFIG:-}" ]; then
+        # The flattener declined this config (slow path already): ask jq for
+        # the value WITH its type (config_into cannot tell a string from a list).
+        # A failed call (_usetyped 2) is never guessed at: all six, with a note.
+        _usetyped=2
+        if _typed=$(_remember_run_jq -r '.session_start_files | if . == null then "" elif type == "array" then (if any(.[]; type != "string" or . == "" or contains(" ") or contains("\t") or contains("\n") or contains("\r")) then "A:#invalid" else "A:" + join(" ") end) elif type == "string" then "S:" + . else "O:" end' "$REMEMBER_CONFIG" 2>/dev/null); then
+            _usetyped=1
+        fi
+    fi
+    if [ "$_usetyped" = 0 ]; then
+        config_into _val ".session_start_files" ""
+    fi
+    if [ "${_REMEMBER_CFG_STATE:-}" = "ok" ]; then
+        config_into _arr ".session_start_files__arr" ""
+        config_into _obj ".session_start_files__obj" ""
+        if [ -n "$_arr" ]; then
+            if [ "$_arr" = "#invalid" ]; then
+                _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+                _isnote=1
+            else
+                _words="${_arr#=}"
+            fi
+        elif [ -n "$_obj" ]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        elif [ -z "$_val" ]; then
+            _isnote=1
+        elif [[ "$_val" == *[[:space:]]* ]]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        else
+            _words="$_val"
+        fi
+    elif [ "$_usetyped" = 2 ]; then
+        _REMEMBER_SESSION_FILES_NOTE="session_start_files could not be read${_tail}"
+        _isnote=1
+    elif [ "$_usetyped" = 1 ]; then
+        if [ -z "$_typed" ] || [ "$_typed" = "S:" ]; then
+            _isnote=1
+        elif [ "$_typed" = "A:#invalid" ] || [ "${_typed:0:2}" = "O:" ]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        elif [ "${_typed:0:2}" = "A:" ]; then
+            _words="${_typed#A:}"
+        elif [[ "$_typed" == *[[:space:]]* ]]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        else
+            _words="${_typed#S:}"
+        fi
+    elif [ -z "$_val" ]; then
+        _isnote=1
+    elif [[ "$_val" == "["*"]" ]]; then
+        _inner="${_val#[}"
+        _inner="${_inner%]}"
+        if [[ "$_inner" =~ $_re ]]; then
+            _inner="${_inner//$_q/ }"
+            _words="${_inner//,/ }"
+        else
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        fi
+    elif [[ "$_val" == *[[:space:]]* || "$_val" == "{"* ]]; then
+        _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+        _isnote=1
+    else
+        _words="$_val"
+    fi
+    if [ "$_isnote" = 0 ]; then
+        if [[ $- == *f* ]]; then _noglob=1; else set -f; fi
+        for _w in $_words; do
+            if [[ " $_all " == *" $_w "* ]]; then
+                _sel="${_sel}${_w} "
+                _any=1
+            else
+                _bad="${_bad}${_bad:+, }${_w}"
+            fi
+        done
+        if [ "$_noglob" = 0 ]; then set +f; fi
+        if [ "$_any" = 1 ]; then
+            _REMEMBER_SESSION_FILES_SEL=""
+            for _n in $_all; do
+                if [[ "$_sel" == *" $_n "* ]]; then
+                    _REMEMBER_SESSION_FILES_SEL="${_REMEMBER_SESSION_FILES_SEL}${_REMEMBER_SESSION_FILES_SEL:+ }${_n}"
+                fi
+            done
+            if [ -n "$_bad" ]; then
+                _REMEMBER_SESSION_FILES_NOTE="session_start_files: ignoring unknown value(s): ${_bad} (allowed: identity, core, today, now, recent, archive)"
+            fi
+        elif [ -n "$_bad" ]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files has no valid value (${_bad})${_tail}"
+        else
+            _REMEMBER_SESSION_FILES_SEL=""
+        fi
+    fi
+    if [ -n "$_REMEMBER_SESSION_FILES_SEL" ]; then
+        _REMEMBER_SESSION_FILES_CSV="${_REMEMBER_SESSION_FILES_SEL// /,}"
+    else
+        _REMEMBER_SESSION_FILES_CSV="none"
+    fi
+}
+
+# _remember_session_start_files_warn
+# Logs the resolver note, if any. Called by session-start-hook.sh only: the
+# resolver also runs for every save and consolidation, which must not repeat
+# the same warning into the log.
+_remember_session_start_files_warn() {
+    [ -n "${_REMEMBER_SESSION_FILES_NOTE:-}" ] || return 0
+    type log >/dev/null 2>&1 || return 0
+    log "memory-context" "WARNING: ${_REMEMBER_SESSION_FILES_NOTE}"
 }
 
 # _remember_render_memory_section
@@ -875,10 +1056,53 @@ _remember_print_sized() {
     done
 }
 
+# _remember_deselected_block_into OUTVAR (#1136)
+# The "not injected" pointer for the memory files session_start_files left out
+# (only those that exist, are non-empty and pass the injection guard), in the
+# same shape as the size-budget pointer, into OUTVAR; empty when there is
+# nothing to point at -- the default configuration, which forks nothing here.
+_remember_deselected_block_into() {
+    local _db_out="" _db_f _db_list=()
+    if [ -n "${_REMEMBER_DESELECTED:-}" ]; then
+        while IFS= read -r _db_f; do
+            if [ -n "$_db_f" ] && [ -f "$_db_f" ] && [ -s "$_db_f" ]; then
+                if _remember_may_inject "$_db_f" "memory-context"; then
+                    _db_list+=("$_db_f")
+                fi
+            fi
+        done <<< "$_REMEMBER_DESELECTED"
+    fi
+    if [ "${#_db_list[@]}" -gt 0 ]; then
+        _db_out="--- not injected (session_start_files) -- grep or read on request ---"$'\n'
+        _db_out="${_db_out}$(_remember_print_sized "${_db_list[@]}")"$'\n\n'
+    fi
+    printf -v "$1" '%s' "$_db_out"
+}
+
+# _remember_render_deselected_only (#1136)
+# The whole MEMORY section when nothing selected is injectable: just the
+# pointer at the files session_start_files left out, or nothing at all.
+_remember_render_deselected_only() {
+    local _rdo_block=""
+    _remember_deselected_block_into _rdo_block
+    if [ -n "$_rdo_block" ]; then
+        echo "=== MEMORY ==="
+        printf '%s' "$_rdo_block"
+    fi
+}
+
 _remember_render_memory_section() {
     local MFILE HAS_MEMORY="" ROTATED_SLICES _remember_rotated_glob_dir
     local _remember_rotated_arr=()
 
+    # #1136: session_start_files = [] means inject no memory at all, but the
+    # files are still named so they can be read on request. Return before
+    # anything below iterates the (empty) array: "${arr[@]}" on an empty array
+    # is an unbound-variable error under set -u on bash < 4.4.
+    if [ "${#MEMORY_FILES[@]}" -eq 0 ]; then
+        _remember_render_deselected_only
+        return 0
+    fi
     for MFILE in "${MEMORY_FILES[@]}"; do
         [ -f "$MFILE" ] && HAS_MEMORY="true"
     done
@@ -897,7 +1121,16 @@ _remember_render_memory_section() {
     local _remember_was_nullglob=0
     shopt -q nullglob && _remember_was_nullglob=1
     shopt -s nullglob
-    _remember_rotated_arr=("$_remember_rotated_glob_dir"/archive-*.md "$_remember_rotated_glob_dir"/recent-*.md)
+    # #1136: rotated slices belong to archive.md / recent.md, so they are only
+    # listed while those files are selected.
+    local _remember_rot_archive=() _remember_rot_recent=()
+    if [[ " ${_REMEMBER_SESSION_FILES_SEL-identity core today now recent archive} " == *" archive "* ]]; then
+        _remember_rot_archive=("$_remember_rotated_glob_dir"/archive-*.md)
+    fi
+    if [[ " ${_REMEMBER_SESSION_FILES_SEL-identity core today now recent archive} " == *" recent "* ]]; then
+        _remember_rot_recent=("$_remember_rotated_glob_dir"/recent-*.md)
+    fi
+    _remember_rotated_arr=(${_remember_rot_archive[@]+"${_remember_rot_archive[@]}"} ${_remember_rot_recent[@]+"${_remember_rot_recent[@]}"})
     [ "$_remember_was_nullglob" = 1 ] || shopt -u nullglob
     if [ "${#_remember_rotated_arr[@]}" -gt 0 ]; then
         ROTATED_SLICES=$(printf '%s\n' "${_remember_rotated_arr[@]}" | sort)
@@ -906,7 +1139,12 @@ _remember_render_memory_section() {
     fi
     [ -n "$ROTATED_SLICES" ] && HAS_MEMORY="true"
 
-    [ -n "$HAS_MEMORY" ] || return 0
+    # Nothing selected exists yet (["now"] before the first save): still name
+    # the files that were left out.
+    if [ -z "$HAS_MEMORY" ]; then
+        _remember_render_deselected_only
+        return 0
+    fi
 
     echo "=== MEMORY ==="
     local MEMORY_INJECT_MAX_BYTES=""
@@ -988,6 +1226,11 @@ _remember_render_memory_section() {
         printf '%s' "$_remember_budget_dropped"
         echo ""
     fi
+    # #1136: name the files session_start_files left out, so the model knows
+    # they exist and can be read on request.
+    local _remember_dsel_block=""
+    _remember_deselected_block_into _remember_dsel_block
+    printf '%s' "$_remember_dsel_block"
     if [ -n "$OVERSIZED_MEMORY" ]; then
         echo "--- too large to inject (kept on disk; grep on request) ---"
         printf '%s' "$OVERSIZED_MEMORY"
@@ -1142,7 +1385,8 @@ _remember_render_memory_section() {
 # HIT (see _remember_start_cache_context_load), so mtimes alone cannot
 # catch this. A mismatched or entirely absent VERSION= line in the
 # manifest is always a miss; see the loader below.
-_REMEMBER_CACHE_FORMAT_VERSION="2"
+# 3 (#1136): the manifest now records the session_start_files selection.
+_REMEMBER_CACHE_FORMAT_VERSION="3"
 
 # _remember_start_cache_manifest_lines
 # Echoes, one per line, "SRC=<path>" for every input the render depends on,
@@ -1153,9 +1397,18 @@ _REMEMBER_CACHE_FORMAT_VERSION="2"
 _remember_start_cache_manifest_lines() {
     local MFILE
     printf 'VERSION=%s\n' "$_REMEMBER_CACHE_FORMAT_VERSION"
-    for MFILE in "${MEMORY_FILES[@]}"; do
+    # #1136: the selection itself is part of the key, not just the mtimes of
+    # the config files that name it -- a config restored with an old mtime
+    # (git checkout, cp -p) must not keep serving the previous selection.
+    printf 'SFILES=%s\n' "${_REMEMBER_SESSION_FILES_CSV:-}"
+    for MFILE in ${MEMORY_FILES[@]+"${MEMORY_FILES[@]}"}; do
         printf 'SRC=%s\n' "$MFILE"
     done
+    # #1136: the files left out are NAMED, with their sizes, in the rendered
+    # section, so a change to one of them must invalidate the cache too.
+    while IFS= read -r MFILE; do
+        [ -z "$MFILE" ] || printf 'SRC=%s\n' "$MFILE"
+    done <<< "${_REMEMBER_DESELECTED:-}"
     # REMEMBER_DIR itself: catches a rotated slice appearing or disappearing
     # even if whatever created it never republished the cache (belt and
     # braces -- every writer of a new memory file in THIS codebase does
@@ -1212,7 +1465,7 @@ _remember_start_cache_context_load() {
     _remember_may_inject "$_cache" "start-cache" || return 1
     _remember_may_inject "$_manifest" "start-cache" || return 1
 
-    local _line _src _mf_version="" _mf_saw_src=0
+    local _line _src _mf_version="" _mf_saw_src=0 _mf_sfiles=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
@@ -1221,6 +1474,9 @@ _remember_start_cache_context_load() {
         # directory's scanner holds a submission on).
         if [ "${_line#VERSION=}" != "$_line" ]; then
             _mf_version="${_line#VERSION=}"
+            continue
+        elif [ "${_line#SFILES=}" != "$_line" ]; then
+            _mf_sfiles="SET:${_line#SFILES=}"
             continue
         elif [ "${_line#SRC=}" != "$_line" ]; then
             _src="${_line#SRC=}"
@@ -1248,6 +1504,9 @@ _remember_start_cache_context_load() {
     # must never be served -- see _REMEMBER_CACHE_FORMAT_VERSION above for
     # why mtimes alone cannot catch this.
     [ "$_mf_version" = "$_REMEMBER_CACHE_FORMAT_VERSION" ] || return 1
+    # #1136: a cache rendered for a different session_start_files selection
+    # (or one with no SFILES= line at all) is a miss, whatever the mtimes say.
+    [ "$_mf_sfiles" = "SET:${_REMEMBER_SESSION_FILES_CSV:-}" ] || return 1
 
     # Direct `cat`, not a command substitution: this stdout IS the function's
     # contract (test_start_context_cache_668.py asserts it byte-identical to
@@ -1491,9 +1750,17 @@ _remember_apply_session_start_budget() {
     _head="${_text:0:$_head_len}"
 
     local _drop_order=("${REMEMBER_ARCHIVE:-}" "${REMEMBER_TODAY_FILE:-}" "${REMEMBER_RECENT:-}" "${REMEMBER_NOW:-}")
+    local _in_sel _m
     for _path in "${_drop_order[@]}"; do
         [ $(( _head_len + ${#_mem} )) -gt "$_max" ] || break
         [ -n "$_path" ] && [ -s "$_path" ] || continue
+        # #1136: a file session_start_files left out is not in the render, so
+        # excluding it would only cost a pointless re-render in a subshell.
+        _in_sel=0
+        for _m in ${MEMORY_FILES[@]+"${MEMORY_FILES[@]}"}; do
+            if [ "$_m" = "$_path" ]; then _in_sel=1; break; fi
+        done
+        [ "$_in_sel" = 1 ] || continue
         _exclude="${_exclude}${_path}
 "
         _next=$(_REMEMBER_BUDGET_EXCLUDE="$_exclude"; _remember_render_memory_section 2>/dev/null)

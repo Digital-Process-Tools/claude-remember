@@ -194,7 +194,8 @@ _config_is_private_path() {
     [ "$1" = .haiku ] || [ "${1#.haiku.}" != "$1" ]
 }
 
-# Flatten every scalar to `dotted.key<TAB>value`, or decline to.
+# Flatten every scalar -- and every array of plain names, as one space-joined
+# value wrapped in brackets (#1136) -- to `dotted.key<TAB>value`, or decline to.
 #
 # It REFUSES rather than guesses, in three cases, because each one is a way for
 # a flattened table to answer a question wrongly and silently:
@@ -215,8 +216,11 @@ _config_is_private_path() {
 # emitted line can begin with `#`: keys are [A-Za-z0-9_.] by the time they are
 # printed.
 #
-# Paths through arrays are skipped, not refused: config() only accepts dotted
-# keys, so it could never name one.
+# Paths INTO arrays are skipped, not refused: config() only accepts dotted
+# keys, so it could never name one. An array itself is carried only when it is
+# an array of single plain names (one bracketed row, "[a b]", "[]" when empty;
+# "#invalid" for any other array), and it never causes a refusal: one whose key
+# is outside the alphabet or collides with another key is simply not carried.
 #
 # NOT `paths(scalars)`. jq's `paths(f)` keeps a path when f's OUTPUT is truthy,
 # so `paths(scalars)` silently drops every `false` in the file — the #159 bug
@@ -323,31 +327,34 @@ _remember_cfg_flatten_cache_path() {
     # collision only ever costs a rejected/regenerated cache, never a wrong
     # one, because the value is never trusted from the filename alone.
     [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
-    # `-v2-`: #864 changed the on-disk FORMAT (see the comment above
-    # _remember_cfg_flatten_q_encode below), so a cache an older build
-    # already wrote under the OLD name must never be opened as if it were
-    # one of these -- it is simply a different file, at a different path,
-    # that this build never looks at; no version line or migration logic
-    # needed inside the file itself.
-    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
+    # The version segment names the on-disk FORMAT and the ROW SET: `-v2-`
+    # (#864) changed the encoding (see the comment above
+    # _remember_cfg_flatten_q_encode below); `-v3-` (#1136) is the first to
+    # carry array and object-marker rows. A cache an older build wrote under an
+    # older name must never be opened as if it were one of these -- it is
+    # simply a different file, at a different path, that this build never
+    # looks at (and never deletes: builds of different ages sharing one TMPDIR
+    # each keep their own file); no version line or migration logic needed
+    # inside the file itself.
+    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v3-${_slug}"
 }
 
 # #888: the OLD (pre-#864) cache name -- the real path above, minus the
-# literal `-v2-` segment. Nothing ever opens this path; it exists only so
+# literal `-v3-` segment. Nothing ever opens this path; it exists only so
 # _remember_cfg_flatten_cache_publish below can best-effort remove the
 # orphan an install upgrading from <=0.38.0 left behind.
 _remember_cfg_flatten_cache_path_v1() {
-    local _v2 _dir _base
-    _v2=$(_remember_cfg_flatten_cache_path) || return 1
-    # #972: anchor the substitution to the filename's own -v2- segment, not
-    # the first occurrence anywhere in the full path -- a bare `${_v2/-v2-/-}`
+    local _live _dir _base
+    _live=$(_remember_cfg_flatten_cache_path) || return 1
+    # #972: anchor the substitution to the filename's own -v3- segment, not
+    # the first occurrence anywhere in the full path -- a bare substitution
     # over the WHOLE path matches inside ${TMPDIR:-/tmp} itself when that
-    # path happens to contain the literal substring -v2- (e.g.
-    # TMPDIR=/mnt/build-v2-staging/tmp), producing a v1 path that does not
+    # path happens to contain the literal substring -v3- (e.g.
+    # TMPDIR=/mnt/build-v3-staging/tmp), producing a v1 path that does not
     # name the real pre-#864 orphan at all.
-    _dir="${_v2%/*}"
-    _base="${_v2##*/}"
-    printf '%s' "${_dir}/${_base/-v2-/-}"
+    _dir="${_live%/*}"
+    _base="${_live##*/}"
+    printf '%s' "${_dir}/${_base/-v3-/-}"
 }
 
 _remember_cfg_flatten_cache_sources() {
@@ -650,15 +657,16 @@ _remember_cfg_flatten_cache_publish() {
     # to skip a second subshell) left behind by an install that upgraded
     # across #864 before this fix existed. Harmless either way -- never
     # required for correctness, same as every other failure path above.
-    # #972: anchor to the basename's own -v2- segment, not the first
+    # #972: anchor to the basename's own -v3- segment, not the first
     # occurrence anywhere in the full path -- see the matching comment in
     # _remember_cfg_flatten_cache_path_v1 above for why a bare substring
     # substitution over $_f is wrong when ${TMPDIR:-/tmp} itself contains
-    # the literal substring -v2-.
+    # the literal substring -v3-. Only the version-less name is ever removed:
+    # an older build's -v2- file belongs to that build and stays (#1136).
     local _f_dir="${_f%/*}"
     local _f_base="${_f##*/}"
-    local _f_v1="${_f_dir}/${_f_base/-v2-/-}"
-    [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
+    local _f_v1="${_f_dir}/${_f_base/-v3-/-}"
+    [ "$_f_v1" != "$_f" ] && [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
     return 0
 }
 

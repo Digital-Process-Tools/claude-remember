@@ -333,7 +333,7 @@ def test_fast_path_with_warm_cache_never_reruns_the_merge(tmp_path, with_user_co
 def test_fast_path_falls_back_to_the_full_merge_when_both_caches_are_missing(tmp_path):
     """Positive control, paired with the test above: delete BOTH caches that
     sit on this path -- #1079's own env cache (`remember-env-*`) AND log.sh's
-    pre-existing #668 flattened-config cache (`remember-config-cache-v2-*`,
+    pre-existing #668 flattened-config cache (`remember-config-cache-v3-*`,
     which the warm run below also primes as a side effect of its own normal
     operation and which alone would make a second `source log.sh` look cheap
     regardless of #1079) -- and prove the harness CAN see jq/mktemp spawns at
@@ -347,7 +347,7 @@ def test_fast_path_falls_back_to_the_full_merge_when_both_caches_are_missing(tmp
 
     cache_files = (
         list(systmp.glob("remember-env-*"))
-        + list(systmp.glob("remember-config-cache-v2-*"))
+        + list(systmp.glob("remember-config-cache-v3-*"))
     )
     assert cache_files, (
         "precondition: the warm run did not publish any cache file at all\n"
@@ -373,7 +373,7 @@ def test_warm_cache_run_leaves_no_new_merged_config_tmpfile_in_shared_tmp(tmp_pa
     `mktemp "${SYS_TMPDIR}/remember-config-XXXXXX"` never runs and nothing
     NEW named remember-config-* can appear in shared tmp after the child
     exits. session-start-hook.sh's own warm run legitimately leaves a
-    PERSISTENT flattened-config cache here too (`remember-config-cache-v2-*`,
+    PERSISTENT flattened-config cache here too (`remember-config-cache-v3-*`,
     unrelated to #1079) -- present BEFORE capture-gap-check.sh ever runs, so
     the claim is "no NEW file appears", not "nothing named remember-config-*
     exists at all".
@@ -418,7 +418,7 @@ def test_cache_miss_path_leaves_no_new_merged_config_tmpfile_in_shared_tmp(tmp_p
 
     cache_files = (
         list(systmp.glob("remember-env-*"))
-        + list(systmp.glob("remember-config-cache-v2-*"))
+        + list(systmp.glob("remember-config-cache-v3-*"))
     )
     assert cache_files, (
         "precondition: the warm run did not publish any cache file at all\n"
@@ -427,15 +427,15 @@ def test_cache_miss_path_leaves_no_new_merged_config_tmpfile_in_shared_tmp(tmp_p
     for f in cache_files:
         f.unlink()
 
-    # Exclude remember-config-cache-v2-* -- unlike the warm-path sibling
+    # Exclude remember-config-cache-v3-* -- unlike the warm-path sibling
     # above, THIS test deletes it first, so a legitimate republish of it by
     # the fresh merge this test forces is expected and is not the leak
     # under test. The bare `remember-config-XXXXXX` mktemp name (no
-    # `-cache-v2-` segment) is the one lib-memory-dir.sh's own EXIT trap
+    # `-cache-v3-` segment) is the one lib-memory-dir.sh's own EXIT trap
     # must remove.
-    before = {p.name for p in systmp.glob("remember-config-*") if "-cache-v2-" not in p.name}
+    before = {p.name for p in systmp.glob("remember-config-*") if "-cache-v" not in p.name}
     _run_capture_gap_check_shimmed(project, remember, env, tmp_path)
-    after = {p.name for p in systmp.glob("remember-config-*") if "-cache-v2-" not in p.name}
+    after = {p.name for p in systmp.glob("remember-config-*") if "-cache-v" not in p.name}
 
     new_files = after - before
     assert not new_files, (
