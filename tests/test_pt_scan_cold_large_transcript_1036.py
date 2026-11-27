@@ -63,7 +63,7 @@ def _sidecar(remember: Path) -> Path:
 
 
 def _scan(remember: Path):
-    offset, lines = _sidecar(remember).read_text(encoding="utf-8").split()
+    offset, lines = _sidecar(remember).read_text(encoding="utf-8").splitlines()[0].split()
     return int(offset), int(lines)
 
 
@@ -73,7 +73,9 @@ def _inflate(remember: Path, offset: int, lines: int) -> None:
     field would read back as '1006' plus a carriage return, fail the hook's
     digit check, and the sidecar would be discarded -- the must-take-the-warm-
     path case then fails for a reason that has nothing to do with the scan."""
-    _sidecar(remember).write_bytes(f"{offset} {lines + 1000}".encode("ascii") + NL)
+    sidecar = _sidecar(remember)
+    path = sidecar.read_bytes().splitlines()[1]
+    sidecar.write_bytes(f"{offset} {lines + 1000}".encode("ascii") + NL + path + NL)
 
 
 def _truth(data: bytes):
