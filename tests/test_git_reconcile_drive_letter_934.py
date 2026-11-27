@@ -40,7 +40,8 @@ from tests._bash_runner import decode_bash_output, resolve_bash, run_bash_file
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 RECONCILE = REPO_ROOT / "hooks.d" / "after_save" / "60-git-reconcile.sh"
-BACKUP = REPO_ROOT / "hooks.d" / "after_save" / "50-git-backup.sh"
+# The git-backup guard moved out of the hook into this shared helper (#1134).
+BACKUP = REPO_ROOT / "scripts" / "lib-git-common-dir.sh"
 RESTORE = REPO_ROOT / "hooks.d" / "before_session_start" / "50-git-restore.sh"
 
 

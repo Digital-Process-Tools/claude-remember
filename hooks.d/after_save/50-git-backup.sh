@@ -24,6 +24,13 @@ set -u  # not -e -- we never want to fail loudly here
 
 # ── Source logging (gives us log(), config(), _remember_date(), REMEMBER_TZ) ─
 source "$PIPELINE_DIR/scripts/log.sh"
+# _remember_git_common_dir (#1134). Missing means "could not tell" below, and the
+# guard declines on that rather than guessing.
+# Tested first: bash 3.2 (macOS /bin/bash) ends a non-interactive script when `source` misses.
+if [ -f "$PIPELINE_DIR/scripts/lib-git-common-dir.sh" ]; then
+    source "$PIPELINE_DIR/scripts/lib-git-common-dir.sh"
+fi
+declare -F _remember_git_common_dir >/dev/null || _remember_git_common_dir() { return 1; }
 
 # ── Activation guard ─────────────────────────────────────────────────────────
 REPO_ROOT=$(dirname "$REMEMBER_DIR")
@@ -36,7 +43,7 @@ SLUG=$(basename "$REMEMBER_DIR")
 # leaked repo instead of the directory we asked about — collapsing both sides of
 # the #138 common-dir comparison onto the same wrong value. The guards are the
 # code that most needs the sanitization, so they get it first.
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 
 # Legacy mode (REMEMBER_DIR is inside PROJECT_DIR) → never run.
 [ "$REPO_ROOT" = "$PROJECT_DIR" ] && exit 0
@@ -80,26 +87,48 @@ fi
 # once, while a repo dedicated to memory backup keeps a different common dir and
 # still activates. Old git without --path-format falls back to resolving the
 # relative form; if even that fails we leave the previous behaviour untouched.
-_gb_common_dir() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    local _d="$1" _out
-    [ -d "$_d" ] || return 1
-    _out=$(git -C "$_d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || _out=""
-    if [ -z "$_out" ]; then
-        _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
-        [ -n "$_out" ] || return 1
-        if [ "${_out#/}" = "$_out" ] && [ "${_out#[A-Za-z]:[/\\]}" = "$_out" ]; then
-            _out="$_d/$_out"
-        fi
-    fi
-    _gb_realpath "$_out"
-}
+#
+# Fail CLOSED (#1134). This hook runs detached, so by the time it gets here an
+# orchestrator may have removed the linked worktree PROJECT_DIR names, or something
+# may have re-created the path as a bare stub. A live lookup from there answers
+# "no repository", which used to be read as "so REPO_ROOT is not the project" and
+# the memory was committed and pushed into the project. So the answer is taken from
+# save-session.sh, which asked while the project was still live
+# (REMEMBER_PROJECT_GIT_STATE / REMEMBER_PROJECT_COMMON_DIR); the live lookup below
+# is only the fallback for a caller that did not provide one, e.g. a manual run.
+#   repo     compare against the captured common dir -- if the project is gone but
+#            the backup repo is provably a different one, the backup still runs
+#   none     the project was not a git checkout when asked: nothing to collide with
+#   unknown  the lookup itself failed: cannot prove separation, so decline
+# Trade-off of the live fallback: a PROJECT_DIR that exists but is not a git
+# checkout is "none", because a non-git project with its own backup repo is
+# legitimate and indistinguishable from a stub there. A vanished one is "unknown".
+PROJECT_GIT_STATE="${REMEMBER_PROJECT_GIT_STATE:-}"
+PROJECT_COMMON_DIR=""
+if [ -n "$PROJECT_GIT_STATE" ]; then
+    PROJECT_COMMON_DIR="${REMEMBER_PROJECT_COMMON_DIR:-}"
+elif PROJECT_COMMON_DIR=$(_remember_git_common_dir "$PROJECT_DIR"); then
+    PROJECT_GIT_STATE=repo
+else
+    [ "$?" = 3 ] && PROJECT_GIT_STATE=none || PROJECT_GIT_STATE=unknown
+    PROJECT_COMMON_DIR=""
+fi
+if [ "$PROJECT_GIT_STATE" = repo ] && [ -z "$PROJECT_COMMON_DIR" ]; then
+    PROJECT_GIT_STATE=unknown
+fi
+if [ "$PROJECT_GIT_STATE" != repo ] && [ "$PROJECT_GIT_STATE" != none ]; then
+    log "git-backup" "declined: could not establish which git repository PROJECT_DIR ($PROJECT_DIR) belongs to (it may have been removed), so it cannot be shown that $REPO_ROOT is not the project's own repository -- nothing is committed or pushed this run."
+    exit 0
+fi
 
-PROJECT_COMMON_DIR=$(_gb_common_dir "$PROJECT_DIR") || PROJECT_COMMON_DIR=""
-BACKUP_COMMON_DIR=$(_gb_common_dir "$REPO_ROOT") || BACKUP_COMMON_DIR=""
-if [ -n "$PROJECT_COMMON_DIR" ] && [ "$PROJECT_COMMON_DIR" = "$BACKUP_COMMON_DIR" ]; then
-    debug_enabled 0 && \
-        log "git-backup" "REPO_ROOT is the project repo (worktree/legacy), skip"
+if BACKUP_COMMON_DIR=$(_remember_git_common_dir "$REPO_ROOT"); then
+    if [ "$PROJECT_GIT_STATE" = repo ] && [ "$PROJECT_COMMON_DIR" = "$BACKUP_COMMON_DIR" ]; then
+        debug_enabled 0 && \
+            log "git-backup" "REPO_ROOT is the project repo (worktree/legacy), skip"
+        exit 0
+    fi
+else
+    log "git-backup" "declined: could not read the git common dir of $REPO_ROOT, so it cannot be shown to differ from the project's repository -- nothing is committed or pushed this run."
     exit 0
 fi
 
@@ -390,7 +419,7 @@ RECONCILE_ENABLED=$(config '.git_reconcile.enabled' 'false')
     [ "$GB_LOCK_STYLE" = "flock" ] || trap 'rm -f "$LOCK_FILE"' EXIT
 
     # Prevent outer git env vars from overriding git -C behaviour.
-    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 
     # `git commit` with or without --no-gpg-sign, the rest of the argv fixed
     # per site: the untracking commit, and the slug's own commit.

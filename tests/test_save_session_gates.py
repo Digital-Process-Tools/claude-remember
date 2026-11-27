@@ -191,7 +191,7 @@ def _make_env(tmp_path: Path, *, exchanges: int, humans: int, position: int = 50
     (plugin / "pipeline" / "shell.py").write_text(STUB_SHELL)
     for script in ("save-session.sh", "resolve-paths.sh", "detect-tools.sh",
                    "bootstrap-dirs.sh", "log.sh", "lib-memory-dir.sh",
-                   "lib-lock.sh", "lib-staging-lock.sh", "lib-slug.sh",
+                   "lib-lock.sh", "lib-staging-lock.sh", "lib-slug.sh", "lib-git-common-dir.sh",
                    "lib-clock.sh",
                    # #1040: the four hooks read their stdin payload through
                    # this library. Tests that wire a hook into this stub
