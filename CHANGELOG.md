@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-11-28 — Pick which memory files load at start, and the save-lock change is rolled back
+
+### Added
+
+- Added a `session_start_files` setting that chooses which memory files Claude
+  is given when a session starts. Your memory lives in six files (`identity`,
+  `core`, `today`, `now`, `recent`, `archive`) and all six are read at every
+  start, which is too much if your daily notes grow long. Set for example
+  `"session_start_files": ["now"]` in `.remember/config.json` to start each
+  session with only your current notes; the other files stay on disk, are named
+  at session start, and Claude can still search them when asked. Leave it out
+  and nothing changes. A name that is not one of the six is ignored with a
+  warning in the log (and if the value is not a plain list of names, or none is
+  valid, all six are used, so a typo can never blank your memory); `[]` means
+  start with no memory at all. The start-up cache now records the
+  selection, so changing the setting always takes effect at the next session
+  start, even if the config file's timestamp does not move (#1136).
+
+### Removed
+
+- Removed: the save-lock recovery added in the previous release (v0.45.1). It was meant to unstick a save lock left behind by a hung save, or by a lock file that a cloud-sync folder (OneDrive, iCloud, Dropbox) had turned into an online-only placeholder. Reviews found it could let two saves run at the same time, which is worse than the problem it fixed, so the save lock now works exactly as it did in v0.45.0. The Ubuntu 26.04 fix that stops two saves running at once there (#1108) stays.
+
+  What this brings back, until the recovery is redesigned as a separate change: a lock left by a save that hung can stay stuck (#1101, reopened), and if your `.remember` folder is in a cloud-sync folder, reading an online-only lock file can make a save wait until it times out (#1103, reopened).
+
+  The two settings that came with the recovery, `REMEMBER_LOCK_MAX_HOLD_SECONDS` and `REMEMBER_LOCK_PID_READ_TIMEOUT`, are gone. If you set either one, it is now ignored; you can delete it. (#1131)
+
+- Compatibility: compatible - nothing that worked in v0.45.0 stops working; the two removed settings are ignored rather than rejected, and every lock behaviour is the v0.45.0 one.
+
+### Fixed
+
+- Fixed: in v0.45.1, if a save could not read its lock file (a permissions error, or a cloud-sync placeholder that answers with an error), another save could take over the lock while the first one was still running, so two saves could run at the same time. Putting the save lock back the way it worked in v0.45.0 removes this (see the removal note in this release). (#1119)
+
+- Fixed: a follow-up attempt to repair the v0.45.1 save-lock problem, never released, still let two saves run at once in a rarer timing case. It is dropped together with the rest of that change by the rollback in this release, so there is nothing to update for it. (#1122)
+
+- Fixed: the nested `claude -p` the summarizer spawns for a save, an NDC
+  compression, or a staging consolidation inherited `CLAUDE_CODE_EFFORT_LEVEL`
+  from the parent environment. Anyone who sets Claude's own effort to `max` in
+  `~/.claude/settings.json` (the only way to keep it at `max` across sessions)
+  had every nested Haiku call run at max effort instead of the plugin's own
+  choice: small saves still finished but cost about five times the output
+  tokens, and the larger NDC and consolidation calls stopped finishing inside
+  their 180s timeout at all. Memory kept working but got slower on every save,
+  then `now.md` stopped rotating once NDC itself always timed out, grew past
+  `session_start_max_bytes`, and SessionStart silently stopped injecting it --
+  with nothing in the logs explaining why. `CLAUDE_CODE_EFFORT_LEVEL` is now
+  removed from the nested call's environment the same way the plugin already
+  removes the parent session's own identity variables, and restored afterward.
+  `CLAUDE_EFFORT` is deliberately left alone: it is not a Claude Code session
+  variable, and unsetting only `CLAUDE_CODE_EFFORT_LEVEL` was enough to fix
+  the measured timeouts (#1128).
+
+- Fixed: on Windows, every consolidation launch left a stray file named `nul`
+  in the folder Claude was started from. Git Bash turns the `/dev/null`
+  placeholder into `nul` on its way through the hidden-launch helper, and the
+  helper only recognised the literal `/dev/null`, so it opened a real file
+  called `nul` instead of skipping the step: the file received the process id
+  and then all of the consolidation's output, appended on every run. Windows
+  cannot delete a file with that name from Explorer or cmd. The launcher now
+  passes an empty placeholder that Git Bash never rewrites (and the helper
+  still treats `nul` as "skip" on Windows only), and this update removes an
+  existing `nul` file from the project folder automatically the next time a
+  session starts (#1132).
+
+- Fixed: the git backup could commit and push your `.remember/` notes into the project's own repository when the project's temporary working copy had been removed, or replaced by an empty folder, by the time the background backup ran. Each save now notes which repository the project belongs to before the backup starts, and the backup uses that answer; if it cannot tell, it skips the run and says so in the log, while a separate backup repository still gets backed up as before. (#1134)
+
+- Fixed: the test `tests/test_recovery_save_stacking_1086.py` failed intermittently on slow macOS CI runners because its stand-in save slept a fixed 2 seconds that the test's own repeated resumes could outlast, so a legitimate second recovery save was misread as stacking; the stand-in now blocks until the test releases it (#1143).
+
 ## [0.45.1] - 2026-11-07 — A stuck save lock now recovers safely instead of blocking every future save
 
 ### Fixed
@@ -5013,7 +5080,8 @@ Fixes [#9](https://github.com/Digital-Process-Tools/claude-remember/issues/9), a
 
 ## [0.1.0] — Initial release
 
-[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.45.1...HEAD
+[Unreleased]: https://github.com/Digital-Process-Tools/claude-remember/compare/v0.46.0...HEAD
+[0.46.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.46.0
 [0.45.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.45.1
 [0.45.0]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.45.0
 [0.44.1]: https://github.com/Digital-Process-Tools/claude-remember/releases/tag/v0.44.1
