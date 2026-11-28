@@ -103,6 +103,9 @@ _remember_detach_windows_impl() {
     pidfile="$2"
     shift 2
 
+    [ "$outfile" = "/dev/null" ] && outfile=""
+    [ "$pidfile" = "/dev/null" ] && pidfile=""
+
     local lib_dir
     lib_dir="${BASH_SOURCE[0]%/*}"
     [ "$lib_dir" = "${BASH_SOURCE[0]}" ] && lib_dir="$(pwd)"

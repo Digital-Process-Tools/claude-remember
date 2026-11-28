@@ -3,11 +3,15 @@
 set -u  # not -e -- we never want to fail loudly here
 
 source "$PIPELINE_DIR/scripts/log.sh"
+if [ -f "$PIPELINE_DIR/scripts/lib-git-common-dir.sh" ]; then
+    source "$PIPELINE_DIR/scripts/lib-git-common-dir.sh"
+fi
+declare -F _remember_git_common_dir >/dev/null || _remember_git_common_dir() { return 1; }
 
 REPO_ROOT=$(dirname "$REMEMBER_DIR")
 SLUG=$(basename "$REMEMBER_DIR")
 
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 
 [ "$REPO_ROOT" = "$PROJECT_DIR" ] && exit 0
 
@@ -20,26 +24,32 @@ if [ "$(_gb_realpath "$TOPLEVEL")" != "$(_gb_realpath "$REPO_ROOT")" ]; then
     exit 0
 fi
 
-_gb_common_dir() {
-    local LC_ALL=C  # bracket ranges below are byte-wise, not collated (#695)
-    local _d="$1" _out
-    [ -d "$_d" ] || return 1
-    _out=$(git -C "$_d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || _out=""
-    if [ -z "$_out" ]; then
-        _out=$(git -C "$_d" rev-parse --git-common-dir 2>/dev/null) || return 1
-        [ -n "$_out" ] || return 1
-        if [ "${_out#/}" = "$_out" ] && [ "${_out#[A-Za-z]:[/\\]}" = "$_out" ]; then
-            _out="$_d/$_out"
-        fi
-    fi
-    _gb_realpath "$_out"
-}
+PROJECT_GIT_STATE="${REMEMBER_PROJECT_GIT_STATE:-}"
+PROJECT_COMMON_DIR=""
+if [ -n "$PROJECT_GIT_STATE" ]; then
+    PROJECT_COMMON_DIR="${REMEMBER_PROJECT_COMMON_DIR:-}"
+elif PROJECT_COMMON_DIR=$(_remember_git_common_dir "$PROJECT_DIR"); then
+    PROJECT_GIT_STATE=repo
+else
+    [ "$?" = 3 ] && PROJECT_GIT_STATE=none || PROJECT_GIT_STATE=unknown
+    PROJECT_COMMON_DIR=""
+fi
+if [ "$PROJECT_GIT_STATE" = repo ] && [ -z "$PROJECT_COMMON_DIR" ]; then
+    PROJECT_GIT_STATE=unknown
+fi
+if [ "$PROJECT_GIT_STATE" != repo ] && [ "$PROJECT_GIT_STATE" != none ]; then
+    log "git-backup" "declined: could not establish which git repository PROJECT_DIR ($PROJECT_DIR) belongs to (it may have been removed), so it cannot be shown that $REPO_ROOT is not the project's own repository -- nothing is committed or pushed this run."
+    exit 0
+fi
 
-PROJECT_COMMON_DIR=$(_gb_common_dir "$PROJECT_DIR") || PROJECT_COMMON_DIR=""
-BACKUP_COMMON_DIR=$(_gb_common_dir "$REPO_ROOT") || BACKUP_COMMON_DIR=""
-if [ -n "$PROJECT_COMMON_DIR" ] && [ "$PROJECT_COMMON_DIR" = "$BACKUP_COMMON_DIR" ]; then
-    debug_enabled 0 && \
-        log "git-backup" "REPO_ROOT is the project repo (worktree/legacy), skip"
+if BACKUP_COMMON_DIR=$(_remember_git_common_dir "$REPO_ROOT"); then
+    if [ "$PROJECT_GIT_STATE" = repo ] && [ "$PROJECT_COMMON_DIR" = "$BACKUP_COMMON_DIR" ]; then
+        debug_enabled 0 && \
+            log "git-backup" "REPO_ROOT is the project repo (worktree/legacy), skip"
+        exit 0
+    fi
+else
+    log "git-backup" "declined: could not read the git common dir of $REPO_ROOT, so it cannot be shown to differ from the project's repository -- nothing is committed or pushed this run."
     exit 0
 fi
 
@@ -162,7 +172,7 @@ RECONCILE_ENABLED=$(config '.git_reconcile.enabled' 'false')
 (
     [ "$GB_LOCK_STYLE" = "flock" ] || trap 'rm -f "$LOCK_FILE"' EXIT
 
-    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR
 
     _gb_commit_untrack() {
         if [ -n "$GPG_SIGN_FLAG" ]; then

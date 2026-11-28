@@ -110,6 +110,7 @@ def _without_session_env():
     saved_execpath = os.environ.pop("CLAUDE_CODE_EXECPATH", None)
     saved_messaging_socket = os.environ.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
     saved_sse_port = os.environ.pop("CLAUDE_CODE_SSE_PORT", None)
+    saved_effort_level = os.environ.pop("CLAUDE_CODE_EFFORT_LEVEL", None)
     try:
         yield
     finally:
@@ -133,6 +134,8 @@ def _without_session_env():
             os.environ["CLAUDE_CODE_MESSAGING_SOCKET"] = saved_messaging_socket
         if saved_sse_port is not None:
             os.environ["CLAUDE_CODE_SSE_PORT"] = saved_sse_port
+        if saved_effort_level is not None:
+            os.environ["CLAUDE_CODE_EFFORT_LEVEL"] = saved_effort_level
 @contextlib.contextmanager
 def _summarizer_environment():
     previous_marker = os.environ.get("REMEMBER_NESTED_SUMMARIZER")

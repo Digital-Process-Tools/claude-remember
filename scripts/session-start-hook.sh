@@ -886,7 +886,7 @@ _remember_cfg_flatten_cache_path() {
     [ -n "${REMEMBER_DIR:-}" ] || return 1
     local _slug="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
     [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
-    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
+    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v3-${_slug}"
 }
 
 
@@ -1034,8 +1034,8 @@ _remember_cfg_flatten_cache_publish() {
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
     local _f_dir="${_f%/*}"
     local _f_base="${_f##*/}"
-    local _f_v1="${_f_dir}/${_f_base/-v2-/-}"
-    [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
+    local _f_v1="${_f_dir}/${_f_base/-v3-/-}"
+    [ "$_f_v1" != "$_f" ] && [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
     return 0
 }
 
@@ -1639,7 +1639,150 @@ _remember_memory_paths() {
     REMEMBER_NOW="$REMEMBER_DIR/now.md"
     REMEMBER_TODAY_FILE="$REMEMBER_DIR/today-${TODAY}.md"
 
-    MEMORY_FILES=("$IDENTITY_FILE" "$CORE_MEMORIES" "$REMEMBER_TODAY_FILE" "$REMEMBER_NOW" "$REMEMBER_RECENT" "$REMEMBER_ARCHIVE")
+    _remember_session_start_files_resolve
+    MEMORY_FILES=()
+    _REMEMBER_DESELECTED=""
+    local _msf_n _msf_p
+    for _msf_n in identity core today now recent archive; do
+        if [ "$_msf_n" = identity ]; then
+            _msf_p="$IDENTITY_FILE"
+        elif [ "$_msf_n" = core ]; then
+            _msf_p="$CORE_MEMORIES"
+        elif [ "$_msf_n" = today ]; then
+            _msf_p="$REMEMBER_TODAY_FILE"
+        elif [ "$_msf_n" = now ]; then
+            _msf_p="$REMEMBER_NOW"
+        elif [ "$_msf_n" = recent ]; then
+            _msf_p="$REMEMBER_RECENT"
+        else
+            _msf_p="$REMEMBER_ARCHIVE"
+        fi
+        if [[ " $_REMEMBER_SESSION_FILES_SEL " == *" $_msf_n "* ]]; then
+            MEMORY_FILES+=("$_msf_p")
+        else
+            _REMEMBER_DESELECTED="${_REMEMBER_DESELECTED}${_msf_p}"$'\n'
+        fi
+    done
+}
+
+_remember_session_start_files_resolve() {
+    local LC_ALL=C
+    local _all="identity core today now recent archive"
+    local _val="" _arr="" _obj="" _inner="" _w _n _sel=" " _bad="" _any=0 _noglob=0 _q="" _words="" _isnote=0 _typed=""
+    local _re='^[[:space:]]*("[A-Za-z0-9_-]+"[[:space:]]*(,[[:space:]]*"[A-Za-z0-9_-]+"[[:space:]]*)*)?$'
+    local _tail=" - injecting all memory files"
+    printf -v _q '\042'
+    _REMEMBER_SESSION_FILES_SEL="$_all"
+    _REMEMBER_SESSION_FILES_NOTE=""
+    local _usetyped=0
+    if type _config_load >/dev/null 2>&1; then
+        if [ -z "${_REMEMBER_CFG_STATE:-}" ] || [ "${_REMEMBER_CFG_LOADED_FROM:-}" != "${REMEMBER_CONFIG:-}" ]; then
+            _config_load
+        fi
+    fi
+    if [ "${_REMEMBER_CFG_STATE:-}" != "ok" ] && [ "${JQ:-}" = jq ] && [ -f "${REMEMBER_CONFIG:-}" ]; then
+        _usetyped=2
+        if _typed=$(_remember_run_jq -r '.session_start_files | if . == null then "" elif type == "array" then (if any(.[]; type != "string" or . == "" or contains(" ") or contains("\t") or contains("\n") or contains("\r")) then "A:#invalid" else "A:" + join(" ") end) elif type == "string" then "S:" + . else "O:" end' "$REMEMBER_CONFIG" 2>/dev/null); then
+            _usetyped=1
+        fi
+    fi
+    if [ "$_usetyped" = 0 ]; then
+        config_into _val ".session_start_files" ""
+    fi
+    if [ "${_REMEMBER_CFG_STATE:-}" = "ok" ]; then
+        config_into _arr ".session_start_files__arr" ""
+        config_into _obj ".session_start_files__obj" ""
+        if [ -n "$_arr" ]; then
+            if [ "$_arr" = "#invalid" ]; then
+                _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+                _isnote=1
+            else
+                _words="${_arr#=}"
+            fi
+        elif [ -n "$_obj" ]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        elif [ -z "$_val" ]; then
+            _isnote=1
+        elif [[ "$_val" == *[[:space:]]* ]]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        else
+            _words="$_val"
+        fi
+    elif [ "$_usetyped" = 2 ]; then
+        _REMEMBER_SESSION_FILES_NOTE="session_start_files could not be read${_tail}"
+        _isnote=1
+    elif [ "$_usetyped" = 1 ]; then
+        if [ -z "$_typed" ] || [ "$_typed" = "S:" ]; then
+            _isnote=1
+        elif [ "$_typed" = "A:#invalid" ] || [ "${_typed:0:2}" = "O:" ]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        elif [ "${_typed:0:2}" = "A:" ]; then
+            _words="${_typed#A:}"
+        elif [[ "$_typed" == *[[:space:]]* ]]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        else
+            _words="${_typed#S:}"
+        fi
+    elif [ -z "$_val" ]; then
+        _isnote=1
+    elif [[ "$_val" == "["*"]" ]]; then
+        _inner="${_val#[}"
+        _inner="${_inner%]}"
+        if [[ "$_inner" =~ $_re ]]; then
+            _inner="${_inner//$_q/ }"
+            _words="${_inner//,/ }"
+        else
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+            _isnote=1
+        fi
+    elif [[ "$_val" == *[[:space:]]* || "$_val" == "{"* ]]; then
+        _REMEMBER_SESSION_FILES_NOTE="session_start_files must be a list of single names${_tail}"
+        _isnote=1
+    else
+        _words="$_val"
+    fi
+    if [ "$_isnote" = 0 ]; then
+        if [[ $- == *f* ]]; then _noglob=1; else set -f; fi
+        for _w in $_words; do
+            if [[ " $_all " == *" $_w "* ]]; then
+                _sel="${_sel}${_w} "
+                _any=1
+            else
+                _bad="${_bad}${_bad:+, }${_w}"
+            fi
+        done
+        if [ "$_noglob" = 0 ]; then set +f; fi
+        if [ "$_any" = 1 ]; then
+            _REMEMBER_SESSION_FILES_SEL=""
+            for _n in $_all; do
+                if [[ "$_sel" == *" $_n "* ]]; then
+                    _REMEMBER_SESSION_FILES_SEL="${_REMEMBER_SESSION_FILES_SEL}${_REMEMBER_SESSION_FILES_SEL:+ }${_n}"
+                fi
+            done
+            if [ -n "$_bad" ]; then
+                _REMEMBER_SESSION_FILES_NOTE="session_start_files: ignoring unknown value(s): ${_bad} (allowed: identity, core, today, now, recent, archive)"
+            fi
+        elif [ -n "$_bad" ]; then
+            _REMEMBER_SESSION_FILES_NOTE="session_start_files has no valid value (${_bad})${_tail}"
+        else
+            _REMEMBER_SESSION_FILES_SEL=""
+        fi
+    fi
+    if [ -n "$_REMEMBER_SESSION_FILES_SEL" ]; then
+        _REMEMBER_SESSION_FILES_CSV="${_REMEMBER_SESSION_FILES_SEL// /,}"
+    else
+        _REMEMBER_SESSION_FILES_CSV="none"
+    fi
+}
+
+_remember_session_start_files_warn() {
+    [ -n "${_REMEMBER_SESSION_FILES_NOTE:-}" ] || return 0
+    type log >/dev/null 2>&1 || return 0
+    log "memory-context" "WARNING: ${_REMEMBER_SESSION_FILES_NOTE}"
 }
 
 _REMEMBER_WCSZ_NAMES=()
@@ -1930,10 +2073,41 @@ _remember_print_sized() {
     done
 }
 
+_remember_deselected_block_into() {
+    local _db_out="" _db_f _db_list=()
+    if [ -n "${_REMEMBER_DESELECTED:-}" ]; then
+        while IFS= read -r _db_f; do
+            if [ -n "$_db_f" ] && [ -f "$_db_f" ] && [ -s "$_db_f" ]; then
+                if _remember_may_inject "$_db_f" "memory-context"; then
+                    _db_list+=("$_db_f")
+                fi
+            fi
+        done <<< "$_REMEMBER_DESELECTED"
+    fi
+    if [ "${#_db_list[@]}" -gt 0 ]; then
+        _db_out="--- not injected (session_start_files) -- grep or read on request ---"$'\n'
+        _db_out="${_db_out}$(_remember_print_sized "${_db_list[@]}")"$'\n\n'
+    fi
+    printf -v "$1" '%s' "$_db_out"
+}
+
+_remember_render_deselected_only() {
+    local _rdo_block=""
+    _remember_deselected_block_into _rdo_block
+    if [ -n "$_rdo_block" ]; then
+        echo "=== MEMORY ==="
+        printf '%s' "$_rdo_block"
+    fi
+}
+
 _remember_render_memory_section() {
     local MFILE HAS_MEMORY="" ROTATED_SLICES _remember_rotated_glob_dir
     local _remember_rotated_arr=()
 
+    if [ "${#MEMORY_FILES[@]}" -eq 0 ]; then
+        _remember_render_deselected_only
+        return 0
+    fi
     for MFILE in "${MEMORY_FILES[@]}"; do
         [ -f "$MFILE" ] && HAS_MEMORY="true"
     done
@@ -1941,7 +2115,14 @@ _remember_render_memory_section() {
     local _remember_was_nullglob=0
     shopt -q nullglob && _remember_was_nullglob=1
     shopt -s nullglob
-    _remember_rotated_arr=("$_remember_rotated_glob_dir"/archive-*.md "$_remember_rotated_glob_dir"/recent-*.md)
+    local _remember_rot_archive=() _remember_rot_recent=()
+    if [[ " ${_REMEMBER_SESSION_FILES_SEL-identity core today now recent archive} " == *" archive "* ]]; then
+        _remember_rot_archive=("$_remember_rotated_glob_dir"/archive-*.md)
+    fi
+    if [[ " ${_REMEMBER_SESSION_FILES_SEL-identity core today now recent archive} " == *" recent "* ]]; then
+        _remember_rot_recent=("$_remember_rotated_glob_dir"/recent-*.md)
+    fi
+    _remember_rotated_arr=(${_remember_rot_archive[@]+"${_remember_rot_archive[@]}"} ${_remember_rot_recent[@]+"${_remember_rot_recent[@]}"})
     [ "$_remember_was_nullglob" = 1 ] || shopt -u nullglob
     if [ "${#_remember_rotated_arr[@]}" -gt 0 ]; then
         ROTATED_SLICES=$(printf '%s\n' "${_remember_rotated_arr[@]}" | sort)
@@ -1950,7 +2131,10 @@ _remember_render_memory_section() {
     fi
     [ -n "$ROTATED_SLICES" ] && HAS_MEMORY="true"
 
-    [ -n "$HAS_MEMORY" ] || return 0
+    if [ -z "$HAS_MEMORY" ]; then
+        _remember_render_deselected_only
+        return 0
+    fi
 
     echo "=== MEMORY ==="
     local MEMORY_INJECT_MAX_BYTES=""
@@ -2004,6 +2188,9 @@ _remember_render_memory_section() {
         printf '%s' "$_remember_budget_dropped"
         echo ""
     fi
+    local _remember_dsel_block=""
+    _remember_deselected_block_into _remember_dsel_block
+    printf '%s' "$_remember_dsel_block"
     if [ -n "$OVERSIZED_MEMORY" ]; then
         echo "--- too large to inject (kept on disk; grep on request) ---"
         printf '%s' "$OVERSIZED_MEMORY"
@@ -2088,14 +2275,18 @@ _remember_render_memory_section() {
     echo ""
 }
 
-_REMEMBER_CACHE_FORMAT_VERSION="2"
+_REMEMBER_CACHE_FORMAT_VERSION="3"
 
 _remember_start_cache_manifest_lines() {
     local MFILE
     printf 'VERSION=%s\n' "$_REMEMBER_CACHE_FORMAT_VERSION"
-    for MFILE in "${MEMORY_FILES[@]}"; do
+    printf 'SFILES=%s\n' "${_REMEMBER_SESSION_FILES_CSV:-}"
+    for MFILE in ${MEMORY_FILES[@]+"${MEMORY_FILES[@]}"}; do
         printf 'SRC=%s\n' "$MFILE"
     done
+    while IFS= read -r MFILE; do
+        [ -z "$MFILE" ] || printf 'SRC=%s\n' "$MFILE"
+    done <<< "${_REMEMBER_DESELECTED:-}"
     printf 'SRC=%s\n' "$REMEMBER_DIR"
     printf 'SRC=%s\n' "${PIPELINE_DIR:-}/config.json"
     printf 'SRC=%s\n' "${HOME:-}/.remember/config.json"
@@ -2116,12 +2307,15 @@ _remember_start_cache_context_load() {
     _remember_may_inject "$_cache" "start-cache" || return 1
     _remember_may_inject "$_manifest" "start-cache" || return 1
 
-    local _line _src _mf_version="" _mf_saw_src=0
+    local _line _src _mf_version="" _mf_saw_src=0 _mf_sfiles=""
     while IFS= read -r _line || [ -n "$_line" ]; do
         _line="${_line%$'\r'}"
         [ -n "$_line" ] || continue
         if [ "${_line#VERSION=}" != "$_line" ]; then
             _mf_version="${_line#VERSION=}"
+            continue
+        elif [ "${_line#SFILES=}" != "$_line" ]; then
+            _mf_sfiles="SET:${_line#SFILES=}"
             continue
         elif [ "${_line#SRC=}" != "$_line" ]; then
             _src="${_line#SRC=}"
@@ -2134,6 +2328,7 @@ _remember_start_cache_context_load() {
     done < "$_manifest"
     [ "$_mf_saw_src" -eq 1 ] || return 1
     [ "$_mf_version" = "$_REMEMBER_CACHE_FORMAT_VERSION" ] || return 1
+    [ "$_mf_sfiles" = "SET:${_REMEMBER_SESSION_FILES_CSV:-}" ] || return 1
 
     cat "$_cache"
     return 0
@@ -2203,9 +2398,15 @@ _remember_apply_session_start_budget() {
     _head="${_text:0:$_head_len}"
 
     local _drop_order=("${REMEMBER_ARCHIVE:-}" "${REMEMBER_TODAY_FILE:-}" "${REMEMBER_RECENT:-}" "${REMEMBER_NOW:-}")
+    local _in_sel _m
     for _path in "${_drop_order[@]}"; do
         [ $(( _head_len + ${#_mem} )) -gt "$_max" ] || break
         [ -n "$_path" ] && [ -s "$_path" ] || continue
+        _in_sel=0
+        for _m in ${MEMORY_FILES[@]+"${MEMORY_FILES[@]}"}; do
+            if [ "$_m" = "$_path" ]; then _in_sel=1; break; fi
+        done
+        [ "$_in_sel" = 1 ] || continue
         _exclude="${_exclude}${_path}
 "
         _next=$(_REMEMBER_BUDGET_EXCLUDE="$_exclude"; _remember_render_memory_section 2>/dev/null)
@@ -2445,6 +2646,7 @@ else
 fi
 
 _remember_memory_paths
+_remember_session_start_files_warn
 
 config_into HANDOFF_MODE ".handoff_mode" "single"
 PER_SESSION_HANDOFF=""

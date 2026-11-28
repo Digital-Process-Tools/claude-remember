@@ -935,7 +935,7 @@ _remember_cfg_flatten_cache_path() {
     [ -n "${REMEMBER_DIR:-}" ] || return 1
     local _slug="${REMEMBER_DIR//[!a-zA-Z0-9]/-}"
     [ "${#_slug}" -gt 120 ] && _slug="${_slug: -120}"
-    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v2-${_slug}"
+    printf '%s' "${TMPDIR:-/tmp}/remember-config-cache-v3-${_slug}"
 }
 
 
@@ -1083,8 +1083,8 @@ _remember_cfg_flatten_cache_publish() {
     mv -f "$_t" "$_f" 2>/dev/null || rm -f "$_t" 2>/dev/null
     local _f_dir="${_f%/*}"
     local _f_base="${_f##*/}"
-    local _f_v1="${_f_dir}/${_f_base/-v2-/-}"
-    [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
+    local _f_v1="${_f_dir}/${_f_base/-v3-/-}"
+    [ "$_f_v1" != "$_f" ] && [ -f "$_f_v1" ] && rm -f "$_f_v1" 2>/dev/null
     return 0
 }
 

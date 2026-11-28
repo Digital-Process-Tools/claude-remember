@@ -18,12 +18,35 @@ _SAVE_SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
 [ "$_SAVE_SCRIPT_DIR" = "${BASH_SOURCE[0]}" ] && _SAVE_SCRIPT_DIR="$(pwd)"
 
 source "$_SAVE_SCRIPT_DIR/resolve-paths.sh"
+
 source "$_SAVE_SCRIPT_DIR/detect-tools.sh"
 source "$_SAVE_SCRIPT_DIR/bootstrap-dirs.sh"
 source "$_SAVE_SCRIPT_DIR/log.sh"
 source "$_SAVE_SCRIPT_DIR/lib-lock.sh"
 source "$_SAVE_SCRIPT_DIR/lib-staging-lock.sh"
+if [ -f "$_SAVE_SCRIPT_DIR/lib-git-common-dir.sh" ]; then
+    source "$_SAVE_SCRIPT_DIR/lib-git-common-dir.sh"
+fi
 log "hook" "save-session: PROJECT_DIR=$PROJECT_DIR PIPELINE_DIR=$PIPELINE_DIR PYTHON=$PYTHON REMEMBER_DIR=$REMEMBER_DIR"
+
+_project_git_rc=1
+if declare -F _remember_git_common_dir >/dev/null; then
+    if REMEMBER_PROJECT_COMMON_DIR=$(_remember_git_common_dir "$PROJECT_DIR"); then _project_git_rc=0; else _project_git_rc=$?; fi
+else
+    REMEMBER_PROJECT_COMMON_DIR=""
+fi
+if [ "$_project_git_rc" = 0 ]; then
+    REMEMBER_PROJECT_GIT_STATE=repo
+else
+    REMEMBER_PROJECT_COMMON_DIR=""
+    if [ "$_project_git_rc" = 3 ]; then
+        REMEMBER_PROJECT_GIT_STATE=none
+    else
+        REMEMBER_PROJECT_GIT_STATE=unknown
+        log "git-backup" "could not determine which git repository PROJECT_DIR ($PROJECT_DIR) belongs to; the backup hook will decline to commit until a save can tell"
+    fi
+fi
+export REMEMBER_PROJECT_COMMON_DIR REMEMBER_PROJECT_GIT_STATE
 
 LOCK_DIR="${REMEMBER_DIR}/tmp/save.lock"
 NDC_COMMIT_LOCK_TIMEOUT="${REMEMBER_NDC_COMMIT_LOCK_TIMEOUT:-30}"
